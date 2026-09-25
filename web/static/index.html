@@ -198,6 +198,8 @@
   </div>
 </header>
 
+<input type="file" id="state-file" accept=".json,application/json" hidden>
+
 <div class="wrap">
 
   <!-- 后端选择 -->
@@ -511,6 +513,7 @@ function renderBackends(list, cur){
         <div class="acts">
           <button class="mini" onclick="verifyBackend('${esc(b.name)}', this)">测试连接</button>
           ${canLogin ? `<button class="mini" onclick="loginBrowser(this)">登录 X</button>` : ""}
+          ${canLogin ? `<button class="mini ghost" onclick="pickStateFile()">上传登录态</button>` : ""}
           ${isCur ? "" : `<button class="mini ghost" onclick="switchBackend('${esc(b.name)}')">切换到此后端</button>`}
         </div>
       </div>`;
@@ -834,6 +837,50 @@ async function togglePause(){
 /* ── 浏览器登录 ───────────────────────────────────────── */
 let loginTimer = null;
 
+/* ── 上传登录态（服务器上无法登录，用这个把别处登录好的文件传上来）── */
+function pickStateFile(){
+  const el = $("state-file");
+  if (!el) return;
+  el.value = "";          // 允许重复选同一个文件
+  el.click();
+}
+
+async function uploadStateFile(file){
+  if (!file) return;
+  if (file.size > 4 * 1024 * 1024){
+    toast("文件太大（登录态一般只有几十 KB）", "err");
+    return;
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  // FormData 不能走 api()：那会给 body 加 JSON 头
+  const headers = {};
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+
+  toast("正在上传登录态…");
+  try {
+    const resp = await fetch("/api/browser/state/upload", {method:"POST", headers, body: fd});
+    const r = await resp.json().catch(() => ({}));
+    if (!resp.ok || r.ok === false){
+      throw new Error(r.error || r.detail || r.message || ("上传失败 HTTP " + resp.status));
+    }
+    toast(r.message || "登录态已上传", "ok");
+    // 上传成功 -> 自动做一次连通性检查，顺便识别出账号是谁
+    try {
+      const st = await api("/api/backends/browser/verify", {method:"POST", body:{}});
+      if (st && st.available !== false){
+        toast("登录态有效" + (st.message ? "：" + st.message : ""), "ok");
+      }
+    } catch(e){
+      // 校验失败不影响上传本身，提示用户手点「测试连接」
+      toast("已上传，但连通性检查未通过：" + e.message, "err");
+    }
+    await refresh();
+  } catch(e){
+    toast("上传失败：" + e.message, "err");
+  }
+}
+
 async function loginBrowser(btn){
   // 走「真实 Chrome」这条路（/login-chrome）：
   // 旧接口 /login 用 Playwright 启动浏览器，带自动化开关，x.com 风控会
@@ -1051,6 +1098,12 @@ function startPolling(){
 bind();
 startSSE();
 setTimeout(() => { if (!STATE) startPolling(); }, 2500);   // SSE 首帧没到就兜底
+
+// 登录态文件选择
+(function(){
+  const el = document.getElementById('state-file');
+  if (el) el.addEventListener('change', e => uploadStateFile(e.target.files[0]));
+})();
 </script>
 </body>
 </html>
