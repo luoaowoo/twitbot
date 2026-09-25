@@ -1,0 +1,21 @@
+# ── 核心 ──────────────────────────────────────────────────
+python-telegram-bot>=21.6
+tweepy>=4.14.0
+requests>=2.31.0
+
+# ── Web 控制台 ────────────────────────────────────────────
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9        # 控制台上传图片/视频（multipart/form-data）需要
+
+# ── 无头浏览器后端 ────────────────────────────────────────
+playwright>=1.40
+
+# ── 真实 Chrome 登录助手（tools/browser_login_chrome.py）─────
+# 用 CDP 从真 Chrome 读取登录态，绕开 Playwright 的自动化指纹。
+# uvicorn[standard] 会顺带装上，但这里显式声明，避免换装 minimal 版时缺依赖。
+websockets>=12.0
+
+# ── 测试 ──────────────────────────────────────────────────
+pytest>=8.0
+httpx>=0.27

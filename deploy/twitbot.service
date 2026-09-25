@@ -1,0 +1,35 @@
+[Unit]
+Description=twitbot - Telegram/Web to X auto poster (web console + publish loop)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 改成实际路径与用户
+WorkingDirectory=/opt/twitbot
+User=twitbot
+Group=twitbot
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+# 只跑 Web 控制台 + 发布循环（不接 Telegram）。
+# 要接 Telegram 就把 --with-tg 加上，此时 main() 会校验 TG_TOKEN。
+ExecStart=/opt/twitbot/.venv/bin/python /opt/twitbot/start.py
+Restart=always
+RestartSec=10
+# 给足退出时间，让正在发的推文收尾
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# 日志走 journald：journalctl -u twitbot -f
+StandardOutput=journal
+StandardError=journal
+
+# 轻量加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/twitbot/data
+
+[Install]
+WantedBy=multi-user.target

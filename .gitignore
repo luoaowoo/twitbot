@@ -1,0 +1,30 @@
+# 凭据 —— 绝不入库
+.env
+*.env
+!.env.example
+
+# 运行时数据（队列 + 媒体 + 浏览器登录态 + 日志 + 锁）
+data/
+*.db
+*.db-wal
+*.db-shm
+*.lock
+
+# 浏览器登录态等同于账号凭据
+storage_state.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
