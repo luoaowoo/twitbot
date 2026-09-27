@@ -144,6 +144,7 @@ cd twitbot
 |---|---|
 | `qwqcon` | `qwqcon_qwqcon` |
 | `luoaowoo` | `luoaowoo_luoaowoo` |
+| `bot` | `luoaowoo` |
 
 两个账号的数据完全独立：各自使用 `data/accounts/<账号>/` 下的队列数据库、设置、
 媒体、浏览器登录态、采集结果和数据日报。登录态放在签名 Cookie 中，密码不写数据库、

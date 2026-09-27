@@ -33,11 +33,16 @@ from . import config
 
 log = logging.getLogger("twitbot.accounts")
 
-ACCOUNT_NAMES: tuple[str, ...] = ("qwqcon", "luoaowoo")
+ACCOUNT_NAMES: tuple[str, ...] = ("qwqcon", "luoaowoo", "bot")
 COOKIE_NAME = "twitbot_session"
 SESSION_DAYS = 30
 
-# 密码规则：账号名_账号名，例如 qwqcon_qwqcon / luoaowoo_luoaowoo。
+# 每个控制台账号固定绑定自己的登录密码。
+_ACCOUNT_PASSWORDS: dict[str, str] = {
+    "qwqcon": "qwqcon_qwqcon",
+    "luoaowoo": "luoaowoo_luoaowoo",
+    "bot": "luoaowoo",
+}
 
 _current_account: ContextVar[str | None] = ContextVar(
     "twitbot_current_account", default=None)
@@ -215,7 +220,8 @@ def init_accounts() -> list[Path]:
 
 def _password_candidates(username: str) -> tuple[str, ...]:
     name = normalize_username(username)
-    return (f"{name}_{name}",)
+    password = _ACCOUNT_PASSWORDS.get(name, "")
+    return (password,) if password else ()
 
 
 def verify_password(username: str, password: str) -> bool:

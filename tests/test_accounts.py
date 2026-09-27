@@ -55,12 +55,20 @@ def test_console_login_account_isolation(tmp_path, monkeypatch):
         assert created.status_code == 200, created.text
         assert len(client.get("/api/jobs").json()["jobs"]) == 1
 
+        client.post("/api/auth/logout")
+        ok = client.post("/api/auth/login", json={
+            "username": "bot", "password": "luoaowoo"})
+        assert ok.status_code == 200, ok.text
+        assert client.get("/api/jobs").json()["jobs"] == []
+
 
 def test_password_rules_and_signed_session():
     from core import accounts
 
     assert accounts.verify_password("qwqcon", "qwqcon_qwqcon")
     assert accounts.verify_password("luoaowoo", "luoaowoo_luoaowoo")
+    assert accounts.verify_password("bot", "luoaowoo")
+    assert not accounts.verify_password("bot", "bot_bot")
     assert not accounts.verify_password("qwqcon", "qwqcon_用户米那个")
     assert not accounts.verify_password("qwqcon", "wrong")
 

@@ -343,7 +343,7 @@
     <label for="auth-pass">密码</label>
     <input id="auth-pass" name="password" type="password" autocomplete="current-password"
            placeholder="请输入密码" required>
-    <div class="limits" style="margin-top:7px;font-size:12px">密码格式：账号名_账号名</div>
+    <div class="limits" style="margin-top:7px;font-size:12px">密码按账号配置</div>
     <button class="primary" type="submit" id="btn-auth-login">登录</button>
     <div class="auth-error" id="auth-error"></div>
   </form>
@@ -1756,14 +1756,23 @@ let colLoginTimer = null;
 let LAST_QR = "";
 let COL_LOGIN_PLATFORM = "";
 
+function showCollectQrLoading(){
+  LAST_QR = "";
+  $("col-login-qr").innerHTML =
+    '<div class="qr-loading"><span class="spinner"></span>' +
+    '<span>正在生成二维码，首次约 10 秒…</span></div>';
+}
+
 async function colLogin(name){
   COL_LOGIN_PLATFORM = name;
   $("col-login").hidden = false;
   $("col-login-title").textContent = "扫码登录 · " + name;
-  $("col-login-qr").innerHTML = '<div class="empty">正在获取二维码…</div>';
+  showCollectQrLoading();
   $("col-login-msg").textContent = "";
   try {
-    const r = await api("/api/collect/login/start", {method:"POST", body:{platform:name}});
+    // 每次打开都强制重新生成，避免拿到上一次过期/失效的二维码。
+    const r = await api("/api/collect/login/start",
+                        {method:"POST", body:{platform:name, force:true}});
     if (r.qr) showCollectQr(r.qr);
     toast(r.message || "请扫码", "ok");
     clearInterval(colLoginTimer);
@@ -1796,6 +1805,8 @@ async function colLoginRestart(){
   const name = COL_LOGIN_PLATFORM;
   if (!name) return;
   try {
+    showCollectQrLoading();
+    $("col-login-msg").textContent = "正在重新生成二维码…";
     const r = await api("/api/collect/login/start",
                         {method:"POST", body:{platform:name, force:true}});
     $("col-login-msg").textContent = r.message || "正在重新生成…";
@@ -1807,7 +1818,8 @@ function showCollectQr(dataUrl){
   if (!dataUrl){ $("col-login-qr").innerHTML = '<div class="empty">二维码还没准备好…</div>'; return; }
   LAST_QR = dataUrl;
   $("col-login-qr").innerHTML = '<img src="' + esc(dataUrl) +
-    '" alt="扫码登录" style="width:220px;height:220px;border-radius:10px;background:#fff;padding:8px">';
+    '" alt="扫码登录" style="width:220px;height:220px;border-radius:10px;background:#fff;padding:8px">' +
+    '<div class="limits" style="margin-top:8px">二维码约 4 分钟内有效；过期请点「重新生成二维码」</div>';
 }
 
 function colLoginClose(){
