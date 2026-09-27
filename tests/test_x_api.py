@@ -59,17 +59,26 @@ def http_error(cls, status_code, *, reason="Error", headers=None, body=None, tex
 class FakeV2:
     """tweepy.Client 替身：记录调用参数，按脚本抛异常或返回响应。"""
 
-    def __init__(self, *, tweet_id="1234567890", raise_on_tweet=None, me_username="tester"):
+    def __init__(self, *, tweet_id="1234567890", raise_on_tweet=None, me_username="tester",
+                 raise_on_retweet=None, retweeted=True):
         self.calls: list[dict] = []
         self._tweet_id = tweet_id
         self._raise = raise_on_tweet
         self._me_username = me_username
+        self._raise_rt = raise_on_retweet
+        self._retweeted = retweeted
 
     def create_tweet(self, **kwargs):
         self.calls.append(("create_tweet", kwargs))
         if self._raise is not None:
             raise self._raise
         return type("R", (), {"data": {"id": self._tweet_id, "text": kwargs.get("text", "")}})()
+
+    def retweet(self, tweet_id, **kwargs):
+        self.calls.append(("retweet", {"tweet_id": tweet_id, **kwargs}))
+        if self._raise_rt is not None:
+            raise self._raise_rt
+        return type("R", (), {"data": {"retweeted": self._retweeted}})()
 
     def get_me(self, **kwargs):
         self.calls.append(("get_me", kwargs))
@@ -414,6 +423,143 @@ def test_quote_id_ignored_when_mode_off(be, monkeypatch, creds):
 
     assert res.ok is True
     assert "quote_tweet_id" not in v2.calls[0][1]
+
+
+# ── publish：评论（回复） ──────────────────────────────────
+
+def test_reply_uses_in_reply_to(be, monkeypatch, creds):
+    """评论走 in_reply_to_tweet_id，而不是 quote_tweet_id。"""
+    monkeypatch.setattr(xapi.settings, "get", lambda key, default="": "auto")
+    v2 = wire(be, monkeypatch)
+
+    res = be.publish(Job(id=25, kind="text", quote_id="r:987654321"), "commenting")
+
+    assert res.ok is True
+    assert v2.calls[0][1]["in_reply_to_tweet_id"] == "987654321"
+    assert "quote_tweet_id" not in v2.calls[0][1]
+    assert res.extra.get("in_reply_to_tweet_id") == "987654321"
+
+
+def test_reply_ignores_quote_mode(be, monkeypatch, creds):
+    """quote_mode=off 只关引用转发，**不能**把评论也关掉。"""
+    monkeypatch.setattr(xapi.settings, "get", lambda key, default="": "off")
+    v2 = wire(be, monkeypatch)
+
+    res = be.publish(Job(id=26, kind="text", quote_id="r:987654321"), "commenting")
+
+    assert res.ok is True
+    assert v2.calls[0][1]["in_reply_to_tweet_id"] == "987654321"
+
+
+# ── publish：转帖（纯转推） ────────────────────────────────
+
+def test_retweet_uses_retweet_api_not_create_tweet(be, monkeypatch, creds):
+    """转帖走 retweet()，**绝不能**掉进 create_tweet —— 那会变成一条新推文。"""
+    v2 = wire(be, monkeypatch)
+
+    res = be.publish(Job(id=27, kind="text", quote_id="t:987654321"), "")
+
+    assert res.ok is True
+    name, kwargs = v2.calls[0]
+    assert name == "retweet", f"转帖必须调 retweet()，实际调了 {name}"
+    assert kwargs["tweet_id"] == "987654321"
+    assert not any(c[0] == "create_tweet" for c in v2.calls)
+    # 转帖没有新推文 id：回执指向被转的原帖
+    assert res.tweet_id == "987654321"
+    assert res.tweet_url == "https://x.com/i/status/987654321"
+    assert res.extra.get("retweet_of") == "987654321"
+
+
+def test_retweet_ignores_text_and_media(be, monkeypatch, creds, media_dir):
+    """即使任务带着正文/媒体，转帖也一个都不该发出去。"""
+    v2 = wire(be, monkeypatch)
+
+    res = be.publish(
+        Job(id=28, kind="photo", media_path="pic.jpg", quote_id="t:555"),
+        "这段文字不该被发出去")
+
+    assert res.ok is True
+    assert [c[0] for c in v2.calls] == ["retweet"]
+    # 媒体也没上传（转帖不传媒体）
+    assert not any("media_upload" in str(c) for c in v2.calls)
+
+
+def test_retweet_ignores_quote_mode_off(be, monkeypatch, creds):
+    """quote_mode=off 关的是"引用"，不该把转帖也关掉。"""
+    monkeypatch.setattr(xapi.settings, "get", lambda key, default="": "off")
+    v2 = wire(be, monkeypatch)
+
+    res = be.publish(Job(id=29, kind="text", quote_id="t:123"), "")
+
+    assert res.ok is True
+    assert v2.calls[0][0] == "retweet"
+
+
+def test_retweet_403_duplicate_is_fatal_not_retryable(be, monkeypatch, creds):
+    """已转过 / 不允许转：X 回 403。不可重试，且不能报成功。"""
+    exc = http_error(tweepy.Forbidden, 403, body={"detail": "You have already retweeted this Tweet."})
+    v2 = wire(be, monkeypatch, FakeV2(raise_on_retweet=exc))
+
+    res = be.publish(Job(id=30, kind="text", quote_id="t:123"), "")
+
+    assert res.ok is False
+    assert res.retryable is False
+    assert res.error
+
+
+def test_retweet_401_mentions_permissions(be, monkeypatch, creds):
+    exc = http_error(tweepy.Unauthorized, 401, body={"detail": "Unauthorized"})
+    wire(be, monkeypatch, FakeV2(raise_on_retweet=exc))
+
+    res = be.publish(Job(id=31, kind="text", quote_id="t:123"), "")
+
+    assert res.ok is False
+    assert "Read and Write" in res.error
+
+
+def test_retweet_429_is_retryable(be, monkeypatch, creds):
+    exc = http_error(tweepy.TooManyRequests, 429, headers={"x-rate-limit-reset": str(int(time.time()) + 300)})
+    wire(be, monkeypatch, FakeV2(raise_on_retweet=exc))
+
+    res = be.publish(Job(id=32, kind="text", quote_id="t:123"), "")
+
+    assert res.ok is False
+    assert res.retryable is True
+    assert res.wait_seconds > 0
+
+
+def test_retweet_bad_target_is_rejected_without_network(be, monkeypatch, creds):
+    """目标不是数字 id：直接拒绝，绝不能把 r:123 之类当成推文 id 发出去。"""
+    v2 = wire(be, monkeypatch)
+
+    res = be.publish(Job(id=33, kind="text", quote_id="t:r:123"), "")
+
+    assert res.ok is False
+    assert res.retryable is False
+    assert v2.calls == [], "非法目标不该发起任何 API 调用"
+
+
+def test_retweet_never_raises_on_unknown_exception(be, monkeypatch, creds):
+    wire(be, monkeypatch, FakeV2(raise_on_retweet=RuntimeError("boom")))
+
+    res = be.publish(Job(id=34, kind="text", quote_id="t:123"), "")
+
+    assert res.ok is False
+    assert "RuntimeError" in res.error
+
+
+def test_retweet_success_when_response_shape_unknown(be, monkeypatch, creds):
+    """tweepy 有的版本返回 None —— 没抛异常就该算成功，不能误报失败。"""
+    class V2(FakeV2):
+        def retweet(self, tweet_id, **kw):
+            self.calls.append(("retweet", {"tweet_id": tweet_id}))
+            return None
+
+    v2 = wire(be, monkeypatch, V2())
+    res = be.publish(Job(id=35, kind="text", quote_id="t:999"), "")
+
+    assert res.ok is True
+    assert v2.calls[0][0] == "retweet"
 
 
 # ── verify ────────────────────────────────────────────────

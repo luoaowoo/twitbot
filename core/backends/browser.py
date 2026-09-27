@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from core import config
+from core import reply as reply_mod
 from core.backends.base import Job, PublishResult
 
 log = logging.getLogger("twitbot.backends.browser")
@@ -74,6 +75,8 @@ SEL_LOGIN_INPUT = 'input[autocomplete="username"]'
 SEL_MODAL_MASK = '[data-testid="mask"]'
 SEL_RETWEET = '[data-testid="retweet"]'
 SEL_QUOTE_ENTRY = '[data-testid="quoteTweet"]'
+SEL_REPLY = '[data-testid="reply"]'
+SEL_RETWEET_CONFIRM = '[data-testid="retweetConfirm"]'
 
 COMPOSE_URL = "https://x.com/compose/post"
 HOME_URL = "https://x.com/home"
@@ -377,7 +380,7 @@ class BrowserBackend:
         """从已登录页面读出 (handle, display_name)。失败返回 ("", "")。
 
         实测（2026-09）：X 左下角的账号切换按钮里同时有显示名和 @handle，
-        形如 "显示名 | @handle"。这是最稳的来源 ——
+        形如 "洛嗷呜luoaowoo | @luoaowoo"。这是最稳的来源 ——
         Notifications 之类页面也会出现别人的 @handle，所以不能乱扫全页。
         """
         try:
@@ -1300,6 +1303,12 @@ class BrowserBackend:
                 return fail(f"登录态失效，请重新登录（当前 URL: {_safe_url(page)}）",
                             retryable=False, page=page, evidence="logged_out")
 
+            # 0) 转帖（纯转推）：不走发帖框，走"转推 -> 确认"这条路，
+            #    抓的是 CreateRetweet 回包而不是 CreateTweet。
+            retweet_to = reply_mod.retweet_target_id(job.quote_id)
+            if retweet_to:
+                return self._do_retweet(page, job, retweet_to, fail)
+
             # 1) 打开发帖入口
             opener, err = self._open_composer(page, job)
             if err:
@@ -1364,6 +1373,98 @@ class BrowserBackend:
 
     # ── 发帖入口 ───────────────────────────────────────────
 
+    def _do_retweet(self, page, job: Job, target_id: str, fail) -> PublishResult:
+        """纯转帖：打开目标推文 -> 点转推 -> 点确认。返回 PublishResult。
+
+        ⚠ 只认 `CreateRetweet` 的网络回包（最强证据）。转帖**没有独立推文 id**
+        （转的是原帖，不会产生新帖），所以这里绝不拿页面 URL 或主页兜底取 id ——
+        那会把**原帖 id** 当成"新推文 id"报给用户，属于假成功 + 错链接。
+        """
+        try:
+            page.goto(f"https://x.com/i/status/{target_id}",
+                      wait_until="domcontentloaded")
+            rt = self._wait_locator(page, SEL_RETWEET, 20_000)
+            if rt is None:
+                if self._probe_login_state(page) is False:
+                    return fail("转帖失败：登录态失效，请重新登录",
+                                retryable=False, page=page, evidence="logged_out")
+                return fail("转帖失败：未找到转推按钮（可能是受保护/已删除的推文，"
+                            "或 X 前端改版）",
+                            retryable=False, page=page, evidence="retweet_button_missing")
+
+            # 点转推按钮可能会被推广弹窗的遮罩拦住
+            self._dismiss_overlays(page)
+            try:
+                rt.first.click(timeout=self.ELEMENT_TIMEOUT_MS)
+            except Exception:
+                self._dismiss_overlays(page)
+                rt.first.click(timeout=self.ELEMENT_TIMEOUT_MS)
+            page.wait_for_timeout(1000)
+
+            confirm = self._wait_locator(page, SEL_RETWEET_CONFIRM, 10_000)
+            if confirm is None:
+                return fail("转帖失败：未找到「转帖」确认菜单项（X 前端可能改版）",
+                            retryable=False, page=page, evidence="retweet_menu_missing")
+
+            resp_holder: dict[str, Any] = {"payload": None, "status": None, "url": ""}
+            try:
+                with page.expect_response(_is_create_retweet_request,
+                                          timeout=self.POST_CONFIRM_TIMEOUT_MS) as info:
+                    confirm.first.click(timeout=self.ELEMENT_TIMEOUT_MS)
+                resp = info.value
+                resp_holder["status"] = _safe_int(getattr(resp, "status", None))
+                resp_holder["url"] = getattr(resp, "url", "") or ""
+                try:
+                    resp_holder["payload"] = resp.json()
+                except Exception:
+                    try:
+                        resp_holder["payload"] = json.loads(resp.text())
+                    except Exception:
+                        resp_holder["payload"] = None
+            except PWTimeoutError:
+                return fail("转帖失败：已点确认但未收到 X 的服务端回包"
+                            "（可能没生效，请到主页核对后再决定是否重试）",
+                            retryable=False, page=page, evidence="retweet_no_response")
+            except Exception as e:
+                return fail(f"转帖失败：点击确认出错: {type(e).__name__}: {e}",
+                            retryable=False, page=page, evidence="retweet_click_failed")
+
+            payload = resp_holder["payload"]
+            errors = _extract_errors(payload)
+            status = resp_holder["status"]
+            extra: dict[str, Any] = {
+                "evidence": "network",
+                "evidence_strength": "strong",
+                "retweet_of": target_id,
+                "http_status": status,
+                "elapsed_ms": int((time.time() - getattr(job, "_started", time.time())) * 1000),
+            }
+            if errors:
+                kind, wait_s, msg = _classify_api_error(errors)
+                extra["evidence"] = "api_error"
+                extra["api_errors"] = errors[:3]
+                return PublishResult(ok=False, backend=self.name, text="",
+                                     error=f"转帖被 X 拒绝: {msg}",
+                                     retryable=(kind == "retry"),
+                                     wait_seconds=wait_s, extra=extra)
+            if status is not None and status >= 400:
+                extra["evidence"] = "http_error"
+                return PublishResult(ok=False, backend=self.name, text="",
+                                     error=f"转帖请求返回 HTTP {status}",
+                                     retryable=(status >= 500 or status == 429),
+                                     extra=extra)
+
+            # 转帖成功的回执指向**原帖**（转帖本身没有独立链接）
+            return PublishResult(
+                ok=True, backend=self.name, text="",
+                tweet_id=target_id,
+                tweet_url=f"https://x.com/i/status/{target_id}",
+                extra=extra,
+            )
+        except Exception as e:
+            return fail(f"转帖异常: {type(e).__name__}: {e}",
+                        retryable=False, page=page, evidence="retweet_exception")
+
     def _open_composer(self, page, job: Job) -> tuple[str, str]:
         """打开发帖框。返回 (用的是哪种入口, 错误信息)。错误信息为空表示成功。
 
@@ -1371,10 +1472,25 @@ class BrowserBackend:
         如果已经点了"引用"菜单但编辑器没出来，绝不能退回普通发帖路径 ——
         那会发出一条**丢掉引用的普通推文**，属于静默的内容错误，
         比直接失败更糟。所以那条路径直接报错，由调用方判 retryable=False。
+
+        评论（回复）同理：编辑器没出来就中止，绝不退回普通发帖 ——
+        那会发出一条**脱离目标推文的孤儿帖**，同样属于静默的内容错误。
         """
+        # 评论：先打开目标推文页，再点"回复"按钮
+        reply_to = reply_mod.reply_target_id(job.quote_id)
+        if reply_to:
+            rerr = self._setup_reply(page, reply_to)
+            if rerr:
+                return "reply", rerr
+            if self._wait_editor(page, 15_000):
+                return "reply", ""
+            return "reply", ("评论失败：已点击「回复」但发帖编辑器未出现"
+                             "（X 前端可能改版），已中止以免发出脱离目标的普通推文")
+
         # 引用转发：先在被引用推文页上走"转推 -> 引用"入口
-        if job.quote_id:
-            qerr = self._setup_quote(page, job.quote_id)
+        quote_to = reply_mod.quote_target_id(job.quote_id)
+        if quote_to:
+            qerr = self._setup_quote(page, quote_to)
             if qerr:
                 return "quote", qerr
             if self._wait_editor(page, 15_000):
@@ -1413,6 +1529,107 @@ class BrowserBackend:
         if self._probe_login_state(page) is False:
             return "", "登录态失效，请重新登录"
         return "", "未找到发帖入口（X 前端可能改版，选择器 SideNav_NewTweet_Button/tweetTextarea_0 失效）"
+
+    def _setup_reply(self, page, reply_id: str) -> str:
+        """在目标推文页上打开"回复"编辑器。返回错误串（空=成功）。"""
+        try:
+            page.goto(f"https://x.com/i/status/{reply_id}",
+                      wait_until="domcontentloaded")
+            # ⚠ 实测（2026-09-25，服务器环境）：推文详情页是客户端渲染的，
+            #   `domcontentloaded` 之后推文正文大约要 3~4 秒才出现。
+            #   固定等 2 秒会间歇性找不到回复按钮 —— 表现成"选择器失效"，
+            #   其实是等太短。这里改成轮询等待，最多 15 秒。
+            btn = self._wait_locator(page, SEL_REPLY, 15_000)
+
+            # ⚠ X 会在自己的推文详情页弹「尝试推广这个帖子！」广告弹窗，
+            #   它带一个全屏 `[data-testid="mask"]` 遮罩，会把回复按钮的点击
+            #   全部拦下来（Playwright 报 "subtree intercepts pointer events"）。
+            #   实测该弹窗是**不定时**出现的，所以每次都要先尝试关掉再点。
+            if btn is not None:
+                self._dismiss_overlays(page)
+                try:
+                    btn.first.click(timeout=self.ELEMENT_TIMEOUT_MS)
+                    return ""
+                except Exception as e:
+                    log.debug("回复按钮点击失败（尝试兜底路径）：%s", e)
+                    # 遮罩可能是点击瞬间才弹出来的，再关一次
+                    self._dismiss_overlays(page)
+                    try:
+                        btn.first.click(timeout=self.ELEMENT_TIMEOUT_MS)
+                        return ""
+                    except Exception as e2:
+                        log.debug("回复按钮二次点击仍失败：%s", e2)
+
+            # 兜底：详情页本身**内置**了一个回复框（页面底部"发布你的回复"）。
+            # 上面那个按钮被遮罩挡住时，这里通常已经就绪，直接聚焦它即可 ——
+            # 效果和点「回复」按钮一样，都是在回复这条推文。
+            self._dismiss_overlays(page)
+            if self._wait_editor(page, 5_000):
+                return ""
+
+            if self._probe_login_state(page) is False:
+                return "评论失败：登录态失效，请重新登录"
+            return ("评论失败：未找到回复入口"
+                    "（目标推文可能受保护/已删除，或 X 前端改版）")
+        except Exception as e:
+            return f"评论失败: {type(e).__name__}: {e}"
+
+    def _dismiss_overlays(self, page) -> None:
+        """关掉挡住页面的弹窗（X 的推广广告等）。best-effort，失败不报错。
+
+        ⚠ 只点"取消/关闭/以后再说"这类**无副作用**的按钮，绝不点推广按钮。
+        """
+        try:
+            if page.locator(SEL_MODAL_MASK).count() == 0:
+                return
+        except Exception:
+            return
+        labels = ("以后再说", "暂不", "取消", "关闭", "Not now", "No thanks",
+                  "Cancel", "Close", "Dismiss")
+        for label in labels:
+            try:
+                for sel in (f'[role="button"]:has-text("{label}")',
+                            f'button:has-text("{label}")'):
+                    loc = page.locator(sel)
+                    n = loc.count()
+                    for i in range(n):
+                        item = loc.nth(i)
+                        try:
+                            if item.is_visible():
+                                item.click(timeout=3_000)
+                                page.wait_for_timeout(300)
+                                return
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+        # 没有已知按钮：按 Esc 兜底
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+
+    def _wait_locator(self, page, selector: str, timeout_ms: int):
+        """轮询等一个**可见**元素出现，返回 locator；超时返回 None。
+
+        X 的详情页是客户端渲染，元素出现时间不固定，固定的 wait_for_timeout
+        会间歇性失败。这里用轮询替代，超时上限由调用方给。
+        """
+        deadline = time.time() + max(timeout_ms, 0) / 1000.0
+        while True:
+            try:
+                loc = page.locator(selector)
+                if loc.count() > 0 and loc.first.is_visible():
+                    return loc
+            except Exception:
+                pass
+            if time.time() >= deadline:
+                return None
+            try:
+                page.wait_for_timeout(300)
+            except Exception:
+                return None
 
     def _setup_quote(self, page, quote_id: str) -> str:
         """在引用目标推文页上打开"引用"编辑器。返回错误串（空=成功）。"""
@@ -1720,13 +1937,13 @@ class BrowserBackend:
 
             # 编辑器清空 + 弹窗关闭
             try:
-                if composer in ("modal", "compose_url", "quote", "inline"):
+                if composer in ("modal", "compose_url", "quote", "inline", "reply"):
                     if page.locator(SEL_EDITOR).count() == 0:
                         out["editor_cleared"] = True
                     else:
                         t = self._read_editor_text(page)
                         out["editor_cleared"] = (t.strip() == "")
-                if composer in ("modal", "compose_url", "quote"):
+                if composer in ("modal", "compose_url", "quote", "reply"):
                     mask = page.locator(SEL_MODAL_MASK)
                     btn = page.locator(SEL_SEND_BUTTON)
                     out["composer_closed"] = (btn.count() == 0) or (mask.count() == 0)
@@ -1745,6 +1962,9 @@ class BrowserBackend:
         errors = _extract_errors(payload)
         tweet_id = _extract_tweet_id(payload)
         status = resp.get("status")
+        # 评论场景：发布后页面 URL 仍停在**目标推文**上，绝不能拿它当评论 id，
+        # 否则回执会把父推文当成这条评论（假成功 + 错链接）。
+        is_reply = reply_mod.is_reply_target(getattr(job, "quote_id", ""))
 
         elapsed = int((time.time() - started) * 1000)
         extra: dict[str, Any] = {
@@ -1793,6 +2013,9 @@ class BrowserBackend:
 
         # C) 页面跳转到详情页拿 id
         url_id, url = self._id_from_url(page)
+        if is_reply and url_id:
+            # 回复编辑器是叠在目标推文页上的，URL 里的 id 是父推文而非评论本身
+            url_id, url = "", ""
         if url_id:
             extra["evidence"] = "url"
             extra["evidence_strength"] = "strong"
@@ -1812,7 +2035,9 @@ class BrowserBackend:
 
         # E) 弱证据：toast 成功文案
         if ui.get("toast_kind") == "ok":
-            rid = self._recover_id_from_profile(page)
+            # 回复不会出现在主页时间线（在"回复"页签里），拿主页最新一条当评论 id
+            # 会取到完全无关的旧推文 —— 宁可只报"成功但无链接"，也不能给错链接。
+            rid = "" if is_reply else self._recover_id_from_profile(page)
             if rid:
                 extra["evidence"] = "profile_recover"
                 extra["evidence_strength"] = "strong"
@@ -1829,7 +2054,7 @@ class BrowserBackend:
 
         # F) 弱证据：编辑器清空 + 弹窗关闭
         if ui.get("editor_cleared") and ui.get("composer_closed"):
-            rid = self._recover_id_from_profile(page)
+            rid = "" if is_reply else self._recover_id_from_profile(page)
             if rid:
                 extra["evidence"] = "profile_recover"
                 extra["evidence_strength"] = "strong"
@@ -1953,6 +2178,23 @@ def _is_create_tweet_request(resp) -> bool:
         url = resp.url or ""
         return ("/CreateTweet" in url or "/CreateNoteTweet" in url
                 or "statuses/update.json" in url)
+    except Exception:
+        return False
+
+
+def _is_create_retweet_request(resp) -> bool:
+    """playwright 响应断言：是否是"转帖"接口。
+
+    ⚠ 必须和 CreateTweet 分开判定：转帖走的是 `/CreateRetweet`，两者都会
+    产生 POST，混在一起会让"转帖"抓到发帖回包、或反过来。
+    """
+    try:
+        if getattr(resp, "request", None) is None:
+            return False
+        if resp.request.method != "POST":
+            return False
+        url = resp.url or ""
+        return "/CreateRetweet" in url or "statuses/retweet" in url
     except Exception:
         return False
 

@@ -23,7 +23,7 @@ from typing import Any, Callable
 import tweepy
 
 from .base import Job, PublishResult
-from .. import config, settings
+from .. import config, reply as reply_mod, settings
 
 log = logging.getLogger("twitbot.backend.x_api")
 
@@ -197,6 +197,21 @@ def _extract_tweet_id(resp: Any) -> str:
     return str(tid) if tid else ""
 
 
+def _resp_is_true(resp: Any) -> bool:
+    """`retweet()` 的回执是否明确为 true（拿不到结构时不当作失败）。
+
+    成功路径**不依赖**本函数：没抛异常就算成功，它只用来在 extra 里
+    记一笔"服务端确实回了 true"，方便排障。
+    """
+    try:
+        data = getattr(resp, "data", resp)
+        if isinstance(data, dict):
+            return bool(data.get("retweeted"))
+        return bool(getattr(data, "retweeted", False))
+    except Exception:
+        return False
+
+
 def _safe_resolved_media(job: Job) -> Any:
     """解析媒体绝对路径；任何异常都当成"没有媒体"。"""
     try:
@@ -207,8 +222,12 @@ def _safe_resolved_media(job: Job) -> Any:
 
 
 def _quote_target(job: Job) -> str:
-    """需要引用转发时返回 quote id，否则空串（quote_mode != auto 时不引用）。"""
-    quote_id = str(getattr(job, "quote_id", "") or "").strip()
+    """需要引用转发时返回 quote id，否则空串（quote_mode != auto 时不引用）。
+
+    ⚠ 回复目标（`r:` 前缀）**不是**引用目标，必须由 `_reply_target()` 处理。
+    这里用 reply 模块过滤，避免把回复误发成引用转发。
+    """
+    quote_id = reply_mod.quote_target_id(getattr(job, "quote_id", ""))
     if not quote_id:
         return ""
     try:
@@ -218,6 +237,14 @@ def _quote_target(job: Job) -> str:
         log.warning("读取 quote_mode 失败，回退 .env 配置：%s", e)
         mode = (config.QUOTE_MODE or "").strip().lower()
     return quote_id if mode == "auto" else ""
+
+
+def _reply_target(job: Job) -> str:
+    """评论（回复）目标推文 id；不是回复任务返回空串。
+
+    刻意**不看** `quote_mode`：回复就是回复，不受"引用开关"影响。
+    """
+    return reply_mod.reply_target_id(getattr(job, "quote_id", ""))
 
 
 # ── 后端实现 ──────────────────────────────────────────────
@@ -338,6 +365,12 @@ class XApiBackend:
             if not ok:
                 return PublishResult(ok=False, backend=self.name, text=text, error=reason)
 
+            # 0) 转帖（纯转推）：走 retweet 接口，不发正文、不传媒体。
+            #    转帖不会产生新推文，回执指向**原帖**。
+            retweet_to = reply_mod.retweet_target_id(getattr(job, "quote_id", ""))
+            if retweet_to:
+                return self._retweet(retweet_to)
+
             # 1) 媒体：失败只降级，不整体失败
             media_ids, degraded = self._upload_media(job)
 
@@ -348,6 +381,9 @@ class XApiBackend:
             quote_id = _quote_target(job)
             if quote_id:
                 kwargs["quote_tweet_id"] = quote_id
+            reply_id = _reply_target(job)
+            if reply_id:
+                kwargs["in_reply_to_tweet_id"] = reply_id
 
             log.info(
                 "#%s 经 X API 发布（媒体 %d 个%s）",
@@ -377,7 +413,10 @@ class XApiBackend:
                 tweet_url=f"https://x.com/i/status/{tweet_id}",
                 media_uploaded=bool(media_ids),
                 degraded=degraded,
-                extra={"quote_tweet_id": quote_id} if quote_id else {},
+                extra=(
+                    {"in_reply_to_tweet_id": reply_id} if reply_id
+                    else ({"quote_tweet_id": quote_id} if quote_id else {})
+                ),
             )
         except Exception as e:
             error, retryable, wait = _classify_exception(e)
@@ -400,6 +439,47 @@ class XApiBackend:
             )
 
     # ── 内部：媒体上传（失败即降级） ──────────────────────
+
+    def _retweet(self, tweet_id: str) -> PublishResult:
+        """纯转推：调 v2 `retweet()`。**绝不抛异常。**
+
+        ⚠ 转帖**不会产生一条新推文** —— 它只是把原帖挂到自己的主页上，
+        所以回执里的 id 就是**被转的原帖 id**。这跟 create_tweet 返回
+        新帖 id 是两回事，绝不能拿页面 URL 或主页链接去兜底取 id，
+        那会把原帖 id 当成"我发的新推文"报给用户，属于假成功 + 错链接。
+
+        Tweepy 的 `retweet()` 成功时返回 `{"retweeted": true}`，**没有 id**，
+        所以 id 只能由调用方传入的目标给出。
+        """
+        text = ""
+        try:
+            ok, reason = self.available()
+            if not ok:
+                return PublishResult(ok=False, backend=self.name, text=text, error=reason)
+            tid = str(tweet_id or "").strip()
+            if not tid or not tid.isdigit():
+                return PublishResult(ok=False, backend=self.name, text=text,
+                                     error=f"转帖目标不是合法的推文 id：{tid!r}",
+                                     retryable=False)
+            resp = self._v2_client().retweet(tid)
+            # 有的客户端/版本返回 {"retweeted": true}，有的返回对象；
+            # 只要没抛异常就当作成功 —— X 对"已经转过"会直接 403 抛异常。
+            log.info("已转帖 %s", tid)
+            return PublishResult(
+                ok=True, backend=self.name, text=text,
+                tweet_id=tid,
+                tweet_url=f"https://x.com/i/status/{tid}",
+                extra={"retweet_of": tid,
+                       "retweeted": bool(_resp_is_true(resp))},
+            )
+        except Exception as e:
+            error, retryable, wait = _classify_exception(e)
+            log.warning("转帖 %s 失败（retryable=%s）：%s", tweet_id, retryable, error)
+            return PublishResult(ok=False, backend=self.name, text=text,
+                                 error=error, retryable=retryable,
+                                 wait_seconds=wait,
+                                 extra={"exception": type(e).__name__,
+                                        "retweet_of": str(tweet_id or "")})
 
     def _upload_media(self, job: Job) -> tuple[list[Any], str]:
         """返回 (media_ids, degraded)。任何失败都降级为 []，不抛异常。"""

@@ -4,7 +4,8 @@
 
 硬性约束（见 AGENT_CONTRACT.md §6）：
   * **绝不 import bot.py**（会拉起 Telegram 长轮询）；只依赖 core。
-  * 默认只绑 127.0.0.1；config.WEB_TOKEN 非空时校验 Bearer / ?token=。
+  * 默认只绑 127.0.0.1；控制台入口先校验账号密码（签名 Cookie）。
+  * config.WEB_TOKEN 非空时仍兼容 Bearer / ?token= 旧访问方式。
   * 后端模块（x_api.py / browser.py）缺失时服务必须照常启动，
     可用性由 registry.describe() 的 loaded=false + reason 表达。
   * 一切错误返回 JSON：{"error": "中文说明"} + 合适状态码。
@@ -18,16 +19,19 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import os
 import logging
+import os
 import re
 import secrets
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 # 允许 `python web/server.py` 直接运行时找到项目根（twitbot/）
 _ROOT = Path(__file__).resolve().parent.parent
@@ -36,11 +40,10 @@ if str(_ROOT) not in sys.path:
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
-from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, Response,
-                               StreamingResponse)  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from core import config, queue, settings, textutil  # noqa: E402
+from core import accounts, analytics, config, queue, reply as reply_mod, settings, textutil  # noqa: E402
 from core.backends import registry  # noqa: E402
 from core.backends.base import Job  # noqa: E402
 
@@ -74,21 +77,67 @@ MEDIA_EXT_KIND = {
 # ══════════════════════════════════════════════════════════
 
 _DESC_TTL = 2.0
-_desc_cache: dict[str, Any] = {"at": 0.0, "data": []}
+_desc_cache: dict[str, dict[str, Any]] = {}
 _desc_lock = threading.Lock()
 
 
-def invalidate_backends_cache() -> None:
+def _cache_key(username: str | None = None) -> str:
+    return accounts.current_account() or username or "_legacy"
+
+
+def invalidate_backends_cache(username: str | None = None) -> None:
+    """清缓存；不传 username 时只清当前账号，传空字符串清全部。"""
     with _desc_lock:
-        _desc_cache["at"] = 0.0
+        if username == "":
+            _desc_cache.clear()
+            return
+        key = _cache_key(username)
+        _desc_cache.pop(key, None)
+
+
+def _clone_backends(data: list[dict]) -> list[dict]:
+    return copy.deepcopy(data)
+
+
+# 各后端「能干什么」—— 放在集成层是因为 core/backends/base.py 已冻结，
+# 不能给后端类加字段。状态：ok = 能 / warn = 能做但有坑 / no = 不能。
+BACKEND_CAPS: dict[str, list[dict]] = {
+    "x_api": [
+        {"t": "发文字", "s": "ok"},
+        {"t": "发图片", "s": "warn"},
+        {"t": "发视频", "s": "warn"},
+        {"t": "转帖", "s": "ok"},
+        {"t": "引用", "s": "ok"},
+        {"t": "评论", "s": "ok"},
+        {"t": "读日报", "s": "no"},
+    ],
+    "browser": [
+        {"t": "发文字", "s": "ok"},
+        {"t": "发图片", "s": "ok"},
+        {"t": "发视频", "s": "ok"},
+        {"t": "转帖", "s": "ok"},
+        {"t": "引用", "s": "ok"},
+        {"t": "评论", "s": "ok"},
+        {"t": "读日报", "s": "ok"},
+    ],
+}
+# 卡片左边那个大字符徽标（比图标省事、辨识度也够）
+BACKEND_GLYPH = {"x_api": "X", "browser": "浏"}
+# 一句话说清这个后端的取舍
+BACKEND_HINT = {
+    "x_api": "走官方接口，稳；但免费层媒体上传常被拒（会自动降级成纯文字）",
+    "browser": "模拟真人在网页上操作：功能最全，但依赖登录态，改版要跟着修",
+}
 
 
 def backends_view(force: bool = False) -> list[dict]:
-    """registry.describe() 的带 TTL 缓存版本（单后端故障不影响其它后端）。"""
+    """registry.describe() 的带 TTL 缓存版本（缓存按账号隔离）。"""
+    key = _cache_key()
     now = time.time()
     with _desc_lock:
-        if not force and _desc_cache["data"] and now - _desc_cache["at"] < _DESC_TTL:
-            return copy.deepcopy(_desc_cache["data"])
+        hit = _desc_cache.get(key)
+        if not force and hit and time.time() - hit["at"] < _DESC_TTL:
+            return _clone_backends(hit["data"])
     try:
         data = registry.describe()
     except Exception as e:  # describe 自身已容错，这里只是最后一道防线
@@ -96,10 +145,14 @@ def backends_view(force: bool = False) -> list[dict]:
         data = [{"name": n, "label": n, "available": False, "loaded": False,
                  "reason": f"注册表异常: {type(e).__name__}: {e}"}
                 for n in ("x_api", "browser")]
+    for b in data:
+        n = b.get("name") or ""
+        b["caps"] = BACKEND_CAPS.get(n, [])
+        b["glyph"] = BACKEND_GLYPH.get(n, (b.get("label") or n or "?")[:1])
+        b["hint"] = BACKEND_HINT.get(n, "")
     with _desc_lock:
-        _desc_cache["at"] = time.time()
-        _desc_cache["data"] = data
-    return copy.deepcopy(data)
+        _desc_cache[key] = {"at": time.time(), "data": data}
+    return _clone_backends(data)
 
 
 def get_backend(name: str):
@@ -128,45 +181,65 @@ def backend_available_or_400(name: str) -> tuple[Any, bool, str]:
 # ══════════════════════════════════════════════════════════
 
 _LOGIN_MAX_EVENTS = 300
-_login_lock = threading.Lock()
-_login_state: dict[str, Any] = {
-    "running": False,
-    "backend": "",
-    "ok": None,          # None=进行中/未开始；True/False=结束态
-    "message": "",
-    "events": [],        # [{"t": iso, "msg": str}]
-    "started_at": "",
-    "finished_at": "",
-    "need_code": False,  # 账号密码登录：X 要求二次验证码（≠失败）
-}
+_login_lock = accounts.shared_state("web.server.login_lock", threading.Lock)
+_login_states: dict[str, dict[str, Any]] = accounts.shared_state("web.server.login_states", dict)
 
 
-def _login_reset(name: str) -> None:
+def _login_key(username: str | None = None) -> str:
+    return accounts.current_account() or accounts.normalize_username(username) or "_legacy"
+
+
+def _empty_login_state() -> dict[str, Any]:
+    return {
+        "running": False,
+        "backend": "",
+        "ok": None,          # None=进行中/未开始；True/False=结束态
+        "message": "",
+        "events": [],        # [{"t": iso, "msg": str}]
+        "started_at": "",
+        "finished_at": "",
+        "need_code": False,  # 账号密码登录：X 要求二次验证码（≠失败）
+    }
+
+
+# 兼容旧测试/旧调用：无账号上下文的登录状态仍可从这里直接读写。
+_login_state = _login_states.setdefault("_legacy", _empty_login_state())
+
+
+def _login_state_for(username: str | None = None) -> dict[str, Any]:
+    key = _login_key(username)
+    return _login_states.setdefault(key, _empty_login_state())
+
+
+def _login_reset(name: str, username: str | None = None) -> None:
     with _login_lock:
-        _login_state.update(
+        _login_state_for(username).update(
             running=True, backend=name, ok=None, message="正在启动登录流程…",
             events=[], started_at=queue.now_iso(), finished_at="", need_code=False,
         )
 
 
-def _login_event(msg: str) -> None:
+def _login_event(msg: str, username: str | None = None) -> None:
     with _login_lock:
-        ev = _login_state["events"]
+        st = _login_state_for(username)
+        ev = st["events"]
         ev.append({"t": queue.now_iso(), "msg": str(msg)})
         if len(ev) > _LOGIN_MAX_EVENTS:
             del ev[: len(ev) - _LOGIN_MAX_EVENTS]
-        _login_state["message"] = str(msg)
+        st["message"] = str(msg)
 
 
-def _login_finish(ok: bool, message: str) -> None:
+def _login_finish(ok: bool, message: str, username: str | None = None) -> None:
     with _login_lock:
-        _login_state.update(running=False, ok=bool(ok), message=str(message),
-                            finished_at=queue.now_iso())
+        _login_state_for(username).update(
+            running=False, ok=bool(ok), message=str(message),
+            finished_at=queue.now_iso(),
+        )
 
 
-def login_status() -> dict:
+def login_status(username: str | None = None) -> dict:
     with _login_lock:
-        snap = copy.deepcopy(_login_state)
+        snap = copy.deepcopy(_login_state_for(username))
     if snap.get("started_at"):
         try:
             t0 = datetime.fromisoformat(snap["started_at"])
@@ -179,92 +252,92 @@ def login_status() -> dict:
     return snap
 
 
-def _login_worker(name: str) -> None:
+def _login_worker(name: str, account_name: str | None = None) -> None:
     """后台线程跑阻塞式 login()，事件推进内存状态供前端轮询。"""
-    try:
-        be = registry.get(name)
-        if not hasattr(be, "login"):
-            _login_finish(False, f"后端 {name} 未实现 login()")
-            return
-        _login_event(f"已调用 {name}.login()，浏览器窗口会打开，请在其中完成登录")
+    with accounts.use_account(account_name):
         try:
-            ok, msg = be.login(on_event=_login_event)
-        except TypeError:
-            # 后端 login() 未接受 on_event 参数时的兼容路径
-            _login_event("该后端 login() 不支持 on_event 回调，改用静默模式")
-            ok, msg = be.login()
-        _login_finish(bool(ok), str(msg or ("登录成功" if ok else "登录失败")))
-    except Exception as e:
-        log.exception("浏览器登录任务失败")
-        _login_event(f"异常：{type(e).__name__}: {e}")
-        _login_finish(False, f"登录异常：{type(e).__name__}: {e}")
-    finally:
-        invalidate_backends_cache()
+            be = registry.get(name)
+            if not hasattr(be, "login"):
+                _login_finish(False, f"后端 {name} 未实现 login()", account_name)
+                return
+            event = lambda msg: _login_event(msg, account_name)
+            event(f"已调用 {name}.login()，浏览器窗口会打开，请在其中完成登录")
+            try:
+                ok, msg = be.login(on_event=event)
+            except TypeError:
+                # 后端 login() 未接受 on_event 参数时的兼容路径
+                event("该后端 login() 不支持 on_event 回调，改用静默模式")
+                ok, msg = be.login()
+            _login_finish(bool(ok), str(msg or ("登录成功" if ok else "登录失败")), account_name)
+        except Exception as e:
+            log.exception("浏览器登录任务失败")
+            _login_event(f"异常：{type(e).__name__}: {e}", account_name)
+            _login_finish(False, f"登录异常：{type(e).__name__}: {e}", account_name)
+        finally:
+            invalidate_backends_cache(account_name)
 
 
-def _login_chrome_worker(name: str) -> None:
-    """用**真实 Chrome**（CDP）登录 —— 绕开 Playwright 的自动化指纹。
-
-    背景：`BrowserBackend.login()` 用 Playwright 启动浏览器，Playwright 会带上
-    `--remote-debugging-pipe` / `--disable-features` 等开关，x.com 风控据此
-    把会话判定为机器人（登录页弹「出了点问题」、URL 出现 `prelude_gate`），
-    **用户手工点也没用**。这条路改用普通方式启动系统真 Chrome，
-    用户正常登录后再用 Chrome 官方调试接口读取登录态。
-    """
-    try:
-        from core import chrome_login  # 延迟导入：未装 websockets 时不拖垮控制台
-        be = registry.get(name)
-        state = be.state_path() if hasattr(be, "state_path") else None
-        if state is None:
-            _login_finish(False, f"后端 {name} 没有 state_path()，无法保存登录态")
-            return
-        profile = state.parent / "chrome-profile"
-        _login_event("正在启动真实 Chrome，请在弹出的窗口里正常登录 X……")
-        ok, msg = chrome_login.login_via_chrome(
-            state_path=state, profile_dir=profile,
-            on_event=_login_event)
-        _login_finish(bool(ok), str(msg))
-    except Exception as e:
-        log.exception("真实 Chrome 登录任务失败")
-        _login_event(f"异常：{type(e).__name__}: {e}")
-        _login_finish(False, f"登录异常：{type(e).__name__}: {e}")
-    finally:
-        invalidate_backends_cache()
+def _login_chrome_worker(name: str, account_name: str | None = None) -> None:
+    """用**真实 Chrome**（CDP）登录 —— 绕开 Playwright 的自动化指纹。"""
+    with accounts.use_account(account_name):
+        try:
+            from core import chrome_login  # 延迟导入：未装 websockets 时不拖垮控制台
+            be = registry.get(name)
+            state = be.state_path() if hasattr(be, "state_path") else None
+            if state is None:
+                _login_finish(False, f"后端 {name} 没有 state_path()，无法保存登录态", account_name)
+                return
+            profile = state.parent / "chrome-profile"
+            event = lambda msg: _login_event(msg, account_name)
+            event("正在启动真实 Chrome，请在弹出的窗口里正常登录 X……")
+            ok, msg = chrome_login.login_via_chrome(
+                state_path=state, profile_dir=profile,
+                on_event=event)
+            _login_finish(bool(ok), str(msg), account_name)
+        except Exception as e:
+            log.exception("真实 Chrome 登录任务失败")
+            _login_event(f"异常：{type(e).__name__}: {e}", account_name)
+            _login_finish(False, f"登录异常：{type(e).__name__}: {e}", account_name)
+        finally:
+            invalidate_backends_cache(account_name)
 
 
-def _login_password_worker(name: str, username: str, password: str, code: str) -> None:
+def _login_password_worker(name: str, account_name: str, username: str,
+                           password: str, code: str) -> None:
     """后台线程跑账号密码登录。
 
     安全：password 只作为局部变量存在，**不写日志、不入库、不回显**。
     `need_code` 用于把"等验证码"与"登录失败"区分开，前端据此显示输入框。
     """
-    try:
-        be = registry.get(name)
-        if not hasattr(be, "login_with_password"):
-            _login_finish(False, f"后端 {name} 不支持账号密码登录")
-            return
-        _login_event(f"已开始用账号 {username} 登录 X（浏览器窗口会打开）")
+    with accounts.use_account(account_name):
         try:
-            ok, msg = be.login_with_password(
-                username=username, password=password, code=code, on_event=_login_event)
-        except TypeError:
-            # 后端未接受 code 参数时的兼容路径
-            ok, msg = be.login_with_password(
-                username=username, password=password, on_event=_login_event)
+            be = registry.get(name)
+            if not hasattr(be, "login_with_password"):
+                _login_finish(False, f"后端 {name} 不支持账号密码登录", account_name)
+                return
+            event = lambda msg: _login_event(msg, account_name)
+            event(f"已开始用账号 {username} 登录 X（浏览器窗口会打开）")
+            try:
+                ok, msg = be.login_with_password(
+                    username=username, password=password, code=code, on_event=event)
+            except TypeError:
+                # 后端未接受 code 参数时的兼容路径
+                ok, msg = be.login_with_password(
+                    username=username, password=password, on_event=event)
 
-        text = str(msg or ("登录成功" if ok else "登录失败"))
-        with _login_lock:
-            # 需要验证码：不是失败态，是"待补充输入"
-            _login_state["need_code"] = (not ok) and ("验证码" in text)
-        _login_finish(bool(ok), text)
-    except Exception as e:
-        log.exception("账号密码登录任务失败")
-        # 异常信息里可能混入表单值，做一次兜底脱敏
-        safe = _redact(str(e), password)
-        _login_event(f"异常：{type(e).__name__}")
-        _login_finish(False, f"登录异常：{type(e).__name__}: {safe}")
-    finally:
-        invalidate_backends_cache()
+            text = str(msg or ("登录成功" if ok else "登录失败"))
+            with _login_lock:
+                # 需要验证码：不是失败态，是"待补充输入"
+                _login_state_for(account_name)["need_code"] = (not ok) and ("验证码" in text)
+            _login_finish(bool(ok), text, account_name)
+        except Exception as e:
+            log.exception("账号密码登录任务失败")
+            # 异常信息里可能混入表单值，做一次兜底脱敏
+            safe = _redact(str(e), password)
+            _login_event(f"异常：{type(e).__name__}", account_name)
+            _login_finish(False, f"登录异常：{type(e).__name__}: {safe}", account_name)
+        finally:
+            invalidate_backends_cache(account_name)
 
 
 def _redact(text: str, *secrets_: str) -> str:
@@ -330,6 +403,7 @@ def status_payload(limit_jobs: int | None = None) -> dict:
     payload: dict[str, Any] = {
         "ok": True,
         "version": WEB_VERSION,
+        "account": accounts.current_account() or "legacy",
         "build": WEB_BUILD,
         "server_time": queue.now_iso(),
         "queue": st,
@@ -341,6 +415,7 @@ def status_payload(limit_jobs: int | None = None) -> dict:
         "pipeline": pipeline_snapshot(),
         "tg": tg_status_view(),
         "media": media_limits_view(),
+        "analytics": analytics_stats_view(),
     }
     if limit_jobs:
         payload["jobs"] = [job_view(r) for r in queue.recent(limit=max(1, min(limit_jobs, 200)))]
@@ -352,21 +427,20 @@ def status_payload(limit_jobs: int | None = None) -> dict:
 # ══════════════════════════════════════════════════════════
 
 _PIPE_LOCK = threading.Lock()
-_pipe_obj: Any = None
+_pipe_objs: dict[str, Any] = {}
+_pipe_obj: Any = None  # 兼容旧调用：无账号上下文的单实例别名
 
 
 def resolve_pipeline() -> tuple[Any | None, str]:
-    """尽力拿到一个带 `publish_one(job_id)` 的 pipeline 实例。
-
-    取用顺序（全部延迟导入 + try/except，**绝不 import bot.py**）：
-      1. 统一启动器若把 Pipeline 实例注册进本模块（set_pipeline_instance）
-      2. core.pipeline.Pipeline() 自建一个（用 LogNotifier，不碰 Telegram）
-      3. 都没有 -> 返回 (None, 中文原因)，调用方回 503
-    """
-    global _pipe_obj
+    """尽力拿到当前账号的 pipeline 实例。"""
+    acct = accounts.current_account()
+    key = acct or "_legacy"
     with _PIPE_LOCK:
-        if _pipe_obj is not None:
-            return _pipe_obj, ""
+        obj = _pipe_objs.get(key)
+        if obj is None and key == "_legacy":
+            obj = _pipe_obj
+        if obj is not None:
+            return obj, ""
         try:
             from core import pipeline as _pl  # 延迟导入：模块可能尚不存在
         except ImportError as e:
@@ -375,17 +449,24 @@ def resolve_pipeline() -> tuple[Any | None, str]:
         if cls is None:
             return None, "core.pipeline 未提供 Pipeline 类"
         try:
-            _pipe_obj = cls()
+            obj = cls()
         except Exception as e:
             return None, f"Pipeline() 构造失败：{type(e).__name__}: {e}"
-        return _pipe_obj, ""
+        _pipe_objs[key] = obj
+        return obj, ""
 
 
-def set_pipeline_instance(obj: Any) -> None:
-    """供统一启动器（start.py）把正在跑的 Pipeline 实例交给控制台复用。"""
+def set_pipeline_instance(obj: Any, username: str | None = None) -> None:
+    """供统一启动器注册账号级 Pipeline；username 为空时注册当前/旧版实例。"""
     global _pipe_obj
+    key = accounts.normalize_username(username) or accounts.current_account() or "_legacy"
     with _PIPE_LOCK:
-        _pipe_obj = obj
+        if obj is None:
+            _pipe_objs.pop(key, None)
+        else:
+            _pipe_objs[key] = obj
+        if key == "_legacy":
+            _pipe_obj = obj
 
 
 # ══════════════════════════════════════════════════════════
@@ -393,18 +474,19 @@ def set_pipeline_instance(obj: Any) -> None:
 # ══════════════════════════════════════════════════════════
 
 _TG_LOCK = threading.Lock()
-_tg_obj: Any = None
+_tg_objs: dict[str, Any] = {}
+_tg_obj: Any = None  # 兼容旧调用：无账号上下文的单实例别名
 
 
 def resolve_tg() -> tuple[Any | None, str]:
-    """拿到 TelegramManager。顺序：start.py 注入 → 自建 → (None, 原因)。
-
-    **绝不 import bot.py**（那会拉起长轮询）；tgmanager 内部才延迟导入。
-    """
-    global _tg_obj
+    """拿到当前账号的 TelegramManager。"""
+    key = accounts.current_account() or "_legacy"
     with _TG_LOCK:
-        if _tg_obj is not None:
-            return _tg_obj, ""
+        obj = _tg_objs.get(key)
+        if obj is None and key == "_legacy":
+            obj = _tg_obj
+        if obj is not None:
+            return obj, ""
         try:
             from core.tgmanager import TelegramManager  # 延迟导入
         except ImportError as e:
@@ -412,20 +494,24 @@ def resolve_tg() -> tuple[Any | None, str]:
         except Exception as e:
             return None, f"Telegram 模块加载失败：{type(e).__name__}: {e}"
         try:
-            _tg_obj = TelegramManager()
+            obj = TelegramManager()
         except Exception as e:
             return None, f"TelegramManager() 构造失败：{type(e).__name__}: {e}"
-        return _tg_obj, ""
+        _tg_objs[key] = obj
+        return obj, ""
 
 
-def set_tg_manager_instance(obj: Any) -> None:
-    """供统一启动器（start.py）把正在跑的 TelegramManager 交给控制台复用。
-
-    必须复用同一个实例 —— 否则控制台「停止机器人」停不掉启动器起的那个轮询。
-    """
+def set_tg_manager_instance(obj: Any, username: str | None = None) -> None:
+    """供统一启动器注册账号级 TelegramManager。"""
     global _tg_obj
+    key = accounts.normalize_username(username) or accounts.current_account() or "_legacy"
     with _TG_LOCK:
-        _tg_obj = obj
+        if obj is None:
+            _tg_objs.pop(key, None)
+        else:
+            _tg_objs[key] = obj
+        if key == "_legacy":
+            _tg_obj = obj
 
 
 def tg_status_view() -> dict:
@@ -463,131 +549,9 @@ def pipeline_snapshot() -> dict:
 # 认证 / 异常处理
 # ══════════════════════════════════════════════════════════
 
-
-_LOGIN_HTML = """<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>twitbot 控制台 · 登录</title>
-<style>
-  *{box-sizing:border-box}
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-       background:#0f1419;color:#e7e9ea;font:15px/1.5 -apple-system,BlinkMacSystemFont,
-       "Segoe UI","Microsoft YaHei",sans-serif}
-  .box{width:100%;max-width:360px;padding:28px;background:#16181c;border:1px solid #2f3336;
-       border-radius:16px}
-  h1{margin:0 0 6px;font-size:20px}
-  p.sub{margin:0 0 20px;color:#71767b;font-size:13px}
-  input{width:100%;padding:12px 14px;background:#202327;border:1px solid #2f3336;
-        border-radius:10px;color:#e7e9ea;font-size:15px;outline:none}
-  input:focus{border-color:#1d9bf0}
-  button{width:100%;margin-top:14px;padding:12px;background:#1d9bf0;border:0;border-radius:10px;
-         color:#fff;font-size:15px;font-weight:600;cursor:pointer}
-  .err{margin-top:12px;padding:10px 12px;background:#3a1a1c;border:1px solid #6b2429;
-       border-radius:8px;color:#ff8b8b;font-size:13px;display:none}
-  .err.show{display:block}
-</style></head>
-<body>
-  <form class="box" id="f">
-    <h1>twitbot 控制台</h1>
-    <p class="sub">请输入管理密码</p>
-    <input type="password" id="pw" autocomplete="current-password"
-           placeholder="管理密码" autofocus required>
-    <button type="submit" id="btn">进入</button>
-    <div class="err" id="err"></div>
-  </form>
-<script>
-  var f=document.getElementById('f'),pw=document.getElementById('pw'),
-      btn=document.getElementById('btn'),err=document.getElementById('err');
-  f.addEventListener('submit',async function(e){
-    e.preventDefault(); btn.disabled=true; err.classList.remove('show');
-    try{
-      var r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({password:pw.value})});
-      if(r.ok){location.href='/';return}
-      var j=await r.json().catch(function(){return{}});
-      err.textContent=j.error||'密码不正确'; err.classList.add('show');
-    }catch(ex){err.textContent='网络错误：'+ex.message; err.classList.add('show')}
-    btn.disabled=false;
-  });
-</script></body></html>"""
-
-
 def expected_token() -> str:
     """运行期读取（测试可 monkeypatch core.config.WEB_TOKEN）。"""
     return (getattr(config, "WEB_TOKEN", "") or "").strip()
-
-
-# ══════════════════════════════════════════════════════════
-# 控制台密码门（服务器版专属）
-# ══════════════════════════════════════════════════════════
-# 默认控制台密码**不写死**：首次启动随机生成并记在 data/.console-password，
-# 避免所有部署共用同一个密码（那等于没密码）。用户可用 WEB_PASSWORD 覆盖。
-WEB_PASSWORD_FILE = "console-password"
-_PW_LOCK = threading.Lock()
-
-
-def _load_or_create_password() -> str:
-    """读或创建控制台密码文件。返回明文密码（仅用于比对）。"""
-    try:
-        from core import config as _cfg
-        f = Path(_cfg.DATA_DIR) / WEB_PASSWORD_FILE
-        with _PW_LOCK:
-            if f.exists():
-                v = f.read_text(encoding="utf-8").strip()
-                if v:
-                    return v
-            v = secrets.token_urlsafe(12)
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(v, encoding="utf-8")
-            try:
-                os.chmod(f, 0o600)
-            except Exception:
-                pass
-            return v
-    except Exception:
-        return ""
-SESSION_COOKIE = "twitbot_session"
-SESSION_TTL_SECONDS = 12 * 60 * 60
-_sessions: dict[str, float] = {}
-_sessions_lock = threading.Lock()
-
-
-def console_password() -> str:
-    """控制台密码。WEB_PASSWORD 非空用它，否则用默认；设为 "-" 表示关闭。"""
-    env = (os.getenv("WEB_PASSWORD") or "").strip()
-    if env == "-":
-        return ""
-    if env:
-        return env
-    return _load_or_create_password()
-
-
-def _new_session() -> str:
-    tok = secrets.token_urlsafe(32)
-    with _sessions_lock:
-        now = time.time()
-        for k in [k for k, exp in _sessions.items() if exp < now]:
-            _sessions.pop(k, None)
-        _sessions[tok] = now + SESSION_TTL_SECONDS
-    return tok
-
-
-def _session_valid(tok: str) -> bool:
-    if not tok:
-        return False
-    with _sessions_lock:
-        exp = _sessions.get(tok, 0)
-        if exp and exp < time.time():
-            _sessions.pop(tok, None)
-            return False
-        return bool(exp)
-
-
-def _session_cookie_ok(request: Request) -> bool:
-    try:
-        return _session_valid(request.cookies.get(SESSION_COOKIE, "") or "")
-    except Exception:
-        return False
 
 
 def _extract_token(request: Request) -> str:
@@ -605,6 +569,11 @@ class JobIn(BaseModel):
     text: str | None = ""
     media_path: str | None = ""
     quote_id: str | None = ""
+    # 评论：填目标推文 id 或链接。与 quote_id 互斥（评论优先）。
+    reply_to: str | None = ""
+    # 转帖：填目标推文 id 或链接。注释即发布，不需要正文。
+    # 优先级：reply_to > retweet_to > quote_id
+    retweet_to: str | None = ""
     kind: str | None = ""
     status: str | None = "pending"
 
@@ -644,16 +613,74 @@ class TgStartIn(BaseModel):
     allowed_chats: str | None = None
 
 
+class TgResolveIn(BaseModel):
+    """把 @用户名 / 数字 id 解析成数字 user id。"""
+    query: str = ""
+
+
+class AdminAddIn(BaseModel):
+    """按 @用户名 / user id 直接加管理员。"""
+    query: str = ""
+
+
+class AdminUserIdIn(BaseModel):
+    user_id: int = 0
+
+
+class SignupDecideIn(BaseModel):
+    signup_id: int = 0
+    approve: bool = True
+
+
+class MemeNameIn(BaseModel):
+    """梗图模板文件名。"""
+    name: str = ""
+
+
+class MemeDraftDeleteIn(BaseModel):
+    """草稿 id。"""
+    name: str = ""
+
+
+class CollectRunIn(BaseModel):
+    """跑一次采集。"""
+    platform: str = "xiaohongshu"
+    pages: int = 2
+    keyword: str = ""
+
+
+class CollectPublishIn(BaseModel):
+    """把采集结果转发布。"""
+    key: str = ""
+    text: str = ""
+    with_source: bool = True
+    immediately: bool = False
+
+
+class CollectKeyIn(BaseModel):
+    key: str = ""
+
+
+class CollectLoginIn(BaseModel):
+    platform: str = ""
+
+
 class MediaValidateIn(BaseModel):
     media: str | None = ""
     kind: str | None = ""
 
 
 class PasswordLoginIn(BaseModel):
-    """账号密码登录。password 只在本次请求内存中活一次，绝不落库。"""
+    """X 账号密码登录。password 只在本次请求内存中活一次，绝不落库。"""
     username: str | None = ""
     password: str | None = ""
     code: str | None = ""      # 二次验证码（可选）
+
+
+class ConsoleLoginIn(BaseModel):
+    """控制台账号登录；密码只用于本次校验。"""
+    username: str | None = ""
+    password: str | None = ""
 
 
 def _as_bool(v: Any, default: bool = False) -> bool:
@@ -730,6 +757,80 @@ def tg_settings_view() -> dict:
     }
 
 
+def _tg_token() -> str:
+    """机器人 token（settings 优先，回落 .env）。**只在本进程内用，绝不外传。**"""
+    try:
+        t = (settings.get("tg_token", "") or "").strip()
+        if t:
+            return t
+    except Exception:
+        pass
+    return (getattr(config, "TG_TOKEN", "") or "").strip()
+
+
+def resolve_tg_chat(query: str) -> dict:
+    """把 ``@用户名`` 或数字 id 解析成 ``{"ok":True,"id":数字,...}``。
+
+    机器人白名单只认数字 user id，让人去记一长串数字太反人类 ——
+    所以这里允许直接填 ``@用户名``，由 Telegram 的 getChat 换算出 id。
+
+    局限（Telegram 的规则，不是我们的）：只有**机器人见过的人**（给机器人发过消息、
+    或同群组）以及公开频道才能被解析出来。
+
+    **安全**：token 会出现在请求 URL 里，所以任何异常都只回 ``type(e).__name__``
+    或 Telegram 自己的 description，绝不把含 token 的字符串带进返回值/日志。
+    """
+    q = (query or "").strip()
+    if not q:
+        return {"ok": False, "error": "空的"}
+    if re.fullmatch(r"-?\d+", q):
+        return {"ok": True, "id": int(q), "title": "", "username": "", "type": ""}
+
+    # 先查本地名册 —— Telegram 的 getChat **查不了私聊用户**
+    # （实测 getChat(\"@某人\") → 400 chat not found，只有频道/超级群行）
+    try:
+        from core import tg_contacts
+        hit = tg_contacts.lookup(q)
+        if hit:
+            return {"ok": True, "id": hit["id"], "title": hit["name"],
+                    "username": hit["username"], "type": hit["chat_type"],
+                    "source": "contacts"}
+    except Exception:
+        pass
+
+    token = _tg_token()
+    if not token:
+        return {"ok": False, "error": "机器人还没有 token —— 先在下面填 Bot Token"}
+    handle = q if q.startswith("@") else "@" + q
+    url = f"https://api.telegram.org/bot{token}/getChat?chat_id={quote(handle)}"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        desc = ""
+        try:
+            desc = (json.loads(e.read().decode("utf-8", "replace")) or {}).get("description") or ""
+        except Exception:
+            desc = ""
+        return {"ok": False, "error": f"Telegram 说：{desc or e.code}"}
+    except Exception as e:
+        # 注意：刻意不用 str(e)，它可能带 token
+        return {"ok": False, "error": f"连不上 Telegram（{type(e).__name__}）"}
+    if not data.get("ok"):
+        return {"ok": False,
+                "error": f"Telegram 说：{data.get('description') or '没找到这个用户'}"}
+    res = data.get("result") or {}
+    title = res.get("title") or " ".join(
+        x for x in (res.get("first_name"), res.get("last_name")) if x)
+    return {"ok": True, "id": res.get("id"), "title": title or "",
+            "username": res.get("username") or "", "type": res.get("type") or ""}
+
+
+def split_id_tokens(raw: str) -> list[str]:
+    """把「@a, 123, @b」这种输入切成一个个 token。"""
+    return [t for t in re.split(r"[,\s，、;；]+", (raw or "").strip()) if t]
+
+
 def _validate_media_or_pass(path: Path, kind: str) -> tuple[bool, str]:
     """跑 core.media.validate()；模块不存在时放行（保持向后兼容）。"""
     try:
@@ -774,17 +875,186 @@ def _resolve_media(media_path: str) -> tuple[str, Path | None]:
 
 
 # ══════════════════════════════════════════════════════════
+# 数据日报接入（core/analytics；模块缺失时控制台照常工作）
+# ══════════════════════════════════════════════════════════
+
+_AN_LOCK = threading.Lock()
+_AN_STATES: dict[str, dict[str, Any]] = {}
+
+
+def _empty_analytics_state() -> dict[str, Any]:
+    return {
+        "running": False, "message": "", "ok": None, "error": "",
+        "started_at": 0.0, "finished_at": 0.0, "result": None,
+    }
+
+
+def _analytics_state_for(username: str | None = None) -> dict[str, Any]:
+    return _AN_STATES.setdefault(_state_key(username), _empty_analytics_state())
+
+
+def _collect_stats() -> dict:
+    try:
+        from core.collect import store as cs
+        return cs.stats()
+    except Exception as e:
+        return {"total": 0, "unused": 0, "by_platform": {}, "error": f"{type(e).__name__}"}
+
+
+_COLLECT_LOCK = threading.Lock()
+_COLLECT_STATES: dict[str, dict] = {}
+
+
+def _state_key(username: str | None = None) -> str:
+    return accounts.current_account() or accounts.normalize_username(username) or "_legacy"
+
+
+def _empty_collect_state() -> dict:
+    return {"running": False, "platform": "", "message": "", "ok": None,
+            "error": "", "started_at": 0.0, "finished_at": 0.0,
+            "found": 0, "saved": 0}
+
+
+def _collect_state_for(username: str | None = None) -> dict:
+    return _COLLECT_STATES.setdefault(_state_key(username), _empty_collect_state())
+
+
+def collect_progress(username: str | None = None) -> dict:
+    with _COLLECT_LOCK:
+        snap = dict(_collect_state_for(username))
+    snap["stats"] = _collect_stats()
+    return snap
+
+
+def _collect_event(msg: str, username: str | None = None) -> None:
+    with _COLLECT_LOCK:
+        _collect_state_for(username)["message"] = str(msg)
+
+
+def _collect_worker(platform: str, pages: int, keyword: str,
+                    account_name: str | None = None) -> None:
+    """后台线程跑采集：平台 fetch() → 入库。"""
+    with accounts.use_account(account_name):
+        res = {"found": 0, "saved": 0, "error": ""}
+        try:
+            from core import collect as collect_mod
+            from core.collect import store as cs
+            col = collect_mod.get_collector(platform)
+            if col is None:
+                res["error"] = f"{platform} 采集器不可用"
+            else:
+                event = lambda msg: _collect_event(msg, account_name)
+                items = col.fetch(pages=pages, keyword=keyword, on_event=event)
+                res["found"] = len(items or [])
+                if items:
+                    res["saved"] = cs.save_items(items)
+                    try:
+                        cs.prune(2000)
+                    except Exception:
+                        pass
+                if not items:
+                    res["error"] = "没采到内容（看看是否要登录）"
+        except Exception as e:                      # 双保险：绝不冒泡
+            log.exception("采集异常")
+            res["error"] = f"{type(e).__name__}: {e}"
+        with _COLLECT_LOCK:
+            _collect_state_for(account_name).update(
+                running=False, ok=not res["error"], error=res["error"],
+                found=res["found"], saved=res["saved"], finished_at=time.time(),
+                message=(f"采集完成：拿到 {res['found']} 条，入库 {res['saved']} 条"
+                         if not res["error"] else f"采集失败：{res['error']}"[:200]))
+
+
+def start_collect(platform: str, pages: int = 2, keyword: str = "",
+                  username: str | None = None) -> tuple[bool, str]:
+    account_name = accounts.current_account() or accounts.normalize_username(username) or None
+    with _COLLECT_LOCK:
+        st = _collect_state_for(account_name)
+        if st["running"]:
+            return False, "正在采集，请稍候…"
+        st.update(running=True, platform=platform, ok=None, error="",
+                  message="准备开始采集…", started_at=time.time(),
+                  finished_at=0.0, found=0, saved=0)
+    threading.Thread(target=_collect_worker,
+                     args=(platform, max(1, min(int(pages), 8)), (keyword or "").strip(), account_name),
+                     name=f"collect-{account_name or 'legacy'}", daemon=True).start()
+    return True, "已开始采集"
+
+
+def analytics_stats_view() -> dict:
+    """采集状态快照。分析模块缺失/异常都不能拖垮 /api/status。"""
+    try:
+        return analytics.stats()
+    except Exception as e:
+        return {"ready": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def _an_event(msg: str, username: str | None = None) -> None:
+    with _AN_LOCK:
+        _analytics_state_for(username)["message"] = str(msg)
+
+
+def analytics_progress(username: str | None = None) -> dict:
+    with _AN_LOCK:
+        snap = dict(_analytics_state_for(username))
+    snap["stats"] = analytics_stats_view()
+    return snap
+
+
+def _analytics_worker(days: int, account_name: str | None = None) -> None:
+    """后台线程跑采集（要开浏览器，几十秒，不能卡住请求）。"""
+    with accounts.use_account(account_name):
+        try:
+            event = lambda msg: _an_event(msg, account_name)
+            res = analytics.refresh(days=days, on_event=event)
+        except Exception as e:                      # 双保险：绝不冒泡
+            log.exception("数据采集异常")
+            res = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        with _AN_LOCK:
+            _analytics_state_for(account_name).update(
+                running=False, ok=bool(res.get("ok")),
+                error=str(res.get("error") or ""), result=res,
+                finished_at=time.time(),
+                message="采集完成" if res.get("ok") else f"采集失败：{res.get('error') or ''}"[:200])
+
+
+def start_analytics_refresh(days: int = 92,
+                            username: str | None = None) -> tuple[bool, str]:
+    """尽力启动一次采集；已在跑就返回 False。"""
+    account_name = accounts.current_account() or accounts.normalize_username(username) or None
+    with _AN_LOCK:
+        st = _analytics_state_for(account_name)
+        if st["running"]:
+            return False, "正在采集，请稍候…"
+        st.update(running=True, ok=None, error="", result=None,
+                  message="准备开始采集…", started_at=time.time(),
+                  finished_at=0.0)
+    threading.Thread(target=_analytics_worker,
+                     args=(max(1, min(int(days), 400)), account_name),
+                     name=f"analytics-collect-{account_name or 'legacy'}",
+                     daemon=True).start()
+    return True, "已开始采集"
+
+
+# ══════════════════════════════════════════════════════════
 # 应用工厂
 # ══════════════════════════════════════════════════════════
 
 def create_app() -> FastAPI:
     """构建 FastAPI 应用（不改全局状态；start.py 可同进程挂载）。"""
-    # 表初始化：jobs + settings（settings 表由 core.settings 惰性建，这里主动触发一次）
-    queue.init_db()
+    # 账号路由必须在任何队列/设置访问之前安装。
+    accounts.install_path_router()
     try:
-        settings.all_settings()
+        accounts.init_accounts()
     except Exception:
-        log.exception("settings 表初始化失败（不致命）")
+        log.exception("多账号数据目录初始化失败（继续启动）")
+    # 表初始化：jobs + settings（settings 表由 core.settings 惰性建，这里主动触发一次）
+    with accounts.use_account(None):
+        queue.init_db()
+        try:
+            settings.all_settings()
+        except Exception:
+            log.exception("settings 表初始化失败（不致命）")
 
     app = FastAPI(
         title="twitbot 控制台",
@@ -825,58 +1095,34 @@ def create_app() -> FastAPI:
         log.exception("未捕获异常")
         return JSONResponse({"error": f"服务内部错误：{type(exc).__name__}: {exc}"}, status_code=500)
 
-    # ── 认证中间件（覆盖 / 与静态资源）──────────────────
+    # ── 认证中间件（账号 Cookie / 兼容 WEB_TOKEN）────────
+    public_paths = {"/", "/index.html", "/favicon.ico", "/healthz",
+                    "/api/auth/login", "/api/auth/logout"}
+
     @app.middleware("http")
     async def _auth(request: Request, call_next):
         path = request.url.path
-
-        # ── 第一道：密码门（服务器版）──
-        pw = console_password()
-        if pw and path not in ("/login", "/healthz", "/favicon.ico"):
-            if not _session_cookie_ok(request):
-                wants_html = ("text/html" in (request.headers.get("accept", "") or ""))
-                if wants_html:
-                    return HTMLResponse(_LOGIN_HTML, status_code=200)
-                return JSONResponse({"error": "未登录：请先在控制台完成密码登录"},
-                                    status_code=401)
-
-        # ── 第二道：原有的 ?token= / Bearer ──
         want = expected_token()
-        if want:
-            got = _extract_token(request)
-            if not got or not secrets.compare_digest(got, want):
-                return JSONResponse(
-                    {"error": "未授权：缺少或错误的访问 token（?token= 或 Authorization: Bearer）"},
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-        resp = await call_next(request)
+        got = _extract_token(request)
+        token_ok = bool(want and got and secrets.compare_digest(got, want))
+        cookie_user = accounts.verify_session(request.cookies.get(accounts.COOKIE_NAME))
+        need_auth = accounts.auth_enabled() and path not in public_paths
+        if need_auth and not cookie_user and not token_ok:
+            return JSONResponse(
+                {"error": "未登录：请先输入账号密码"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Session"},
+            )
+        if want and path not in ("/api/auth/login", "/api/auth/logout") and not cookie_user and not token_ok:
+            return JSONResponse(
+                {"error": "未授权：缺少或错误的访问 token（?token= 或 Authorization: Bearer）"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        with accounts.use_account(cookie_user):
+            resp = await call_next(request)
         if path in ("/", "/index.html"):
             resp.headers["Cache-Control"] = "no-store"
-        return resp
-
-    @app.post("/login", include_in_schema=False)
-    async def do_login(body: dict):
-        pw = console_password()
-        if not pw:
-            return JSONResponse({"ok": True, "message": "未启用密码门"})
-        got = str((body or {}).get("password") or "")
-        if not got or not secrets.compare_digest(got, pw):
-            return JSONResponse({"error": "密码不正确"}, status_code=401)
-        tok = _new_session()
-        resp = JSONResponse({"ok": True})
-        resp.set_cookie(SESSION_COOKIE, tok, max_age=SESSION_TTL_SECONDS,
-                        httponly=True, samesite="lax", path="/")
-        return resp
-
-    @app.post("/logout", include_in_schema=False)
-    async def do_logout(request: Request):
-        tok = request.cookies.get(SESSION_COOKIE, "")
-        if tok:
-            with _sessions_lock:
-                _sessions.pop(tok, None)
-        resp = JSONResponse({"ok": True})
-        resp.delete_cookie(SESSION_COOKIE, path="/")
         return resp
 
     # ── 前端 ─────────────────────────────────────────────
@@ -893,6 +1139,33 @@ def create_app() -> FastAPI:
     @app.get("/healthz", include_in_schema=False)
     async def healthz():
         return {"ok": True, "version": WEB_VERSION}
+
+    # ── 控制台账号登录 ───────────────────────────────────
+    @app.post("/api/auth/login")
+    async def api_auth_login(body: ConsoleLoginIn, request: Request):
+        name = accounts.normalize_username(body.username)
+        if not accounts.verify_password(name, body.password or ""):
+            raise HTTPException(401, "账号或密码错误")
+        token = accounts.issue_session(name)
+        resp = JSONResponse({"ok": True, "username": name, "account": name})
+        resp.set_cookie(
+            accounts.COOKIE_NAME, token,
+            max_age=accounts.SESSION_DAYS * 86400,
+            httponly=True, samesite="lax", secure=request.url.scheme == "https",
+            path="/",
+        )
+        return resp
+
+    @app.post("/api/auth/logout")
+    async def api_auth_logout():
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(accounts.COOKIE_NAME, path="/")
+        return resp
+
+    @app.get("/api/auth/me")
+    async def api_auth_me():
+        name = accounts.current_account() or "legacy"
+        return {"ok": True, "username": name, "account": name}
 
     # ── 状态 ─────────────────────────────────────────────
     @app.get("/api/status")
@@ -918,7 +1191,10 @@ def create_app() -> FastAPI:
         kind = (body.kind or "").strip().lower() or _guess_kind(media_rel)
         if kind not in VALID_KINDS:
             raise HTTPException(400, f"未知类型 {kind!r}；可选：{'/'.join(VALID_KINDS)}")
-        if not text and not media_rel:
+        # 转帖没有正文也没有媒体，唯一的入参是目标推文；其余类型必须至少有一项
+        # 内容，否则会入队一条空推文。
+        is_retweet = bool((body.retweet_to or "").strip())
+        if not text and not media_rel and not is_retweet:
             raise HTTPException(400, "正文与媒体至少填一项")
         if kind == "text" and media_rel:
             kind = _guess_kind(media_rel)
@@ -933,14 +1209,37 @@ def create_app() -> FastAPI:
         if status not in ("pending", "awaiting"):
             raise HTTPException(400, "新建任务的状态只能是 pending（立即排队）或 awaiting（待人工确认）")
 
-        quote_id = (body.quote_id or "").strip()
-        if not quote_id:
-            quote_id = textutil.first_tweet_id(text) or ""
-        if quote_id and not quote_id.isdigit():
-            raise HTTPException(400, "引用推文 ID 必须是数字（也可直接粘贴推文链接）")
-        if not quote_id:
-            m = textutil.TWEET_ID_RE.search(text or "")
-            quote_id = m.group(1) if m else ""
+        # 推文操作目标（可选）。三者互斥，按 reply_to > retweet_to > quote_id
+        # 的优先级取第一个非空的：一个任务只能对一条推文做一件事。
+        reply_to = (body.reply_to or "").strip()
+        retweet_to = (body.retweet_to or "").strip()
+        if reply_to or retweet_to:
+            raw_target = reply_to or retweet_to
+            target = (textutil.first_tweet_id(raw_target)
+                      or (raw_target if raw_target.isdigit() else ""))
+            if not target:
+                what = "评论" if reply_to else "转帖"
+                raise HTTPException(
+                    400, f"{what}目标必须是推文 ID 或推文链接"
+                         "（如 https://x.com/xxx/status/123）")
+            if reply_to:
+                quote_id = reply_mod.make_reply_target(target)
+            else:
+                quote_id = reply_mod.make_retweet_target(target)
+                # 转帖没有正文也没有媒体：入参给了内容说明用户点错了，直接拒绝，
+                # 别静默把文字丢掉发一个纯转帖出去。
+                if text or media_rel:
+                    raise HTTPException(
+                        400, "转帖不能带正文或媒体（要配文字请用「引用」）")
+        else:
+            quote_id = (body.quote_id or "").strip()
+            if not quote_id:
+                quote_id = textutil.first_tweet_id(text) or ""
+            if quote_id and not quote_id.isdigit():
+                raise HTTPException(400, "引用推文 ID 必须是数字（也可直接粘贴推文链接）")
+            if not quote_id:
+                m = textutil.TWEET_ID_RE.search(text or "")
+                quote_id = m.group(1) if m else ""
 
         c_hash = textutil.content_hash(kind, text, quote_id,
                                       media_abs.name if media_abs else "")
@@ -1068,8 +1367,12 @@ def create_app() -> FastAPI:
         if login_status().get("running"):
             raise HTTPException(409, "登录已在进行中，请等待当前登录结束（或稍后查看进度）")
         _login_reset(name)
-        threading.Thread(target=_login_worker, args=(name,), name=f"login-{name}",
-                         daemon=True).start()
+        threading.Thread(
+            target=_login_worker,
+            args=(name, accounts.current_account()),
+            name=f"login-{accounts.current_account() or 'legacy'}-{name}",
+            daemon=True,
+        ).start()
         return {
             "ok": True, "started": True, "backend": name,
             "purpose": "浏览器窗口会打开，请在其中完成登录",
@@ -1097,8 +1400,12 @@ def create_app() -> FastAPI:
         if login_status().get("running"):
             raise HTTPException(409, "登录已在进行中，请等待当前登录结束（或稍后查看进度）")
         _login_reset(name)
-        threading.Thread(target=_login_chrome_worker, args=(name,),
-                         name=f"login-chrome-{name}", daemon=True).start()
+        threading.Thread(
+            target=_login_chrome_worker,
+            args=(name, accounts.current_account()),
+            name=f"login-chrome-{accounts.current_account() or 'legacy'}-{name}",
+            daemon=True,
+        ).start()
         return {
             "ok": True, "started": True, "backend": name, "mode": "chrome",
             "purpose": "Chrome 窗口会打开，请在那里正常登录 X",
@@ -1187,11 +1494,93 @@ def create_app() -> FastAPI:
             raise HTTPException(400, msg or "重启失败")
         return {"ok": True, "message": msg, "tg": tg_status_view()}
 
-    # ── 浏览器登录态：上传 / 查看（服务器部署的关键）──────
+    @app.post("/api/tg/resolve")
+    async def api_tg_resolve(body: TgResolveIn):
+        """把 @用户名 换算成数字 user id（填管理员时用，免得手抄一长串数字）。"""
+        return await asyncio.to_thread(resolve_tg_chat, body.query or "")
+
+    @app.get("/api/tg/contacts")
+    async def api_tg_contacts(limit: int = 20):
+        """最近跟机器人说过话的人 —— 点一下就能设成管理员。"""
+        try:
+            from core import tg_contacts
+            rows = await asyncio.to_thread(tg_contacts.recent, limit)
+            return {"ok": True, "contacts": rows}
+        except Exception as e:
+            # 名册只是锦上添花，缺了也别让页面报错
+            return {"ok": True, "contacts": [],
+                    "error": f"{type(e).__name__}: {e}"}
+
+    # ── 管理员列表 + 申请审批 ─────────────────────────────
+    @app.get("/api/tg/admins")
+    async def api_tg_admins():
+        """管理员列表（含所有者标记）+ 待审批申请。"""
+        from core import tg_admins
+        await asyncio.to_thread(tg_admins.ensure_seed)
+        return {"ok": True,
+                "admins": await asyncio.to_thread(tg_admins.admins),
+                "pending": await asyncio.to_thread(tg_admins.pending_signups),
+                "owner_id": await asyncio.to_thread(tg_admins.owner_id)}
+
+    @app.post("/api/tg/admins/add")
+    async def api_tg_admins_add(body: AdminAddIn):
+        """直接加管理员（老板自己拉人，不用走申请）。支持 @用户名。"""
+        from core import tg_admins
+        q = (body.query or "").strip()
+        if not q:
+            raise HTTPException(400, "请填 @用户名 或 user id")
+        r = await asyncio.to_thread(resolve_tg_chat, q)
+        if not r.get("ok") or r.get("id") is None:
+            raise HTTPException(400, f"没认出 {q}：{r.get('error') or '解析失败'}")
+        ok = await asyncio.to_thread(tg_admins.add_admin, int(r["id"]),
+                                     r.get("username") or "", r.get("title") or "",
+                                     0, "manual")
+        if not ok:
+            raise HTTPException(500, "写入失败")
+        return {"ok": True, "user_id": int(r["id"]),
+                "message": f"已加为管理员：{r.get('title') or r['id']}"}
+
+    @app.post("/api/tg/admins/remove")
+    async def api_tg_admins_remove(body: AdminUserIdIn):
+        from core import tg_admins
+        ok = await asyncio.to_thread(tg_admins.remove_admin, body.user_id)
+        if not ok:
+            raise HTTPException(400, "移除失败：可能只剩最后一个管理员了（不能全删）")
+        return {"ok": True, "message": "已移除"}
+
+    @app.post("/api/tg/admins/owner")
+    async def api_tg_admins_owner(body: AdminUserIdIn):
+        """指定所有者（审批人）。传 0 = 回到「列表里第一个」。"""
+        from core import tg_admins
+        if body.user_id and not await asyncio.to_thread(tg_admins.is_admin, body.user_id):
+            raise HTTPException(400, "所有者必须是列表里的管理员")
+        await asyncio.to_thread(tg_admins.set_owner, body.user_id or 0)
+        return {"ok": True,
+                "message": "已更新所有者" if body.user_id else "所有者已恢复为第一个管理员"}
+
+    @app.post("/api/tg/admins/decide")
+    async def api_tg_admins_decide(body: SignupDecideIn):
+        """批准 / 拒绝一条申请（控制台走这条；机器人里是按钮回调）。"""
+        from core import tg_admins
+        ok, msg, row = await asyncio.to_thread(
+            tg_admins.decide, body.signup_id, bool(body.approve), 0)
+        if not ok:
+            raise HTTPException(400, msg or "审批失败")
+        if row:
+            note = ("✅ 你的申请已通过，现在可以给机器人发料了。"
+                    if body.approve else
+                    "❌ 你的申请未通过。一个月后可以重新申请。")
+            await asyncio.to_thread(tg_admins.notify_user, row["user_id"], note)
+        return {"ok": True, "message": msg, "signup": row}
+
+    # ── 浏览器登录态：上传 / 查看（没装 Chrome 的机器靠这个）──
     @app.post("/api/browser/state/upload")
     async def api_browser_state_upload(file: UploadFile = File(...)):
-        """上传 storage_state.json。只接受合法 JSON 且必须含 auth_token。"""
-        import json as _json
+        """上传 storage_state.json。只接受合法 JSON 且必须含 auth_token。
+
+        用途：本机没有真实 Chrome（或「登录 X」被风控挡住）时，
+        在别的机器上用 tools/一键收集登录态.bat 导出，再传到这里。
+        """
         from core.backends import browser as _browser_mod
 
         raw = await file.read()
@@ -1200,18 +1589,19 @@ def create_app() -> FastAPI:
         if len(raw) > 4 * 1024 * 1024:
             raise HTTPException(400, "文件过大（登录态通常几十 KB）")
         try:
-            data = _json.loads(raw.decode("utf-8", errors="replace"))
+            data = json.loads(raw.decode("utf-8", errors="replace"))
         except Exception as e:
             raise HTTPException(400, f"不是合法 JSON：{type(e).__name__}: {e}")
         if not isinstance(data, dict) or "cookies" not in data:
             raise HTTPException(400, "格式不对：应是 Playwright 的 storage_state.json（需含 cookies）")
         cookies = data.get("cookies") or []
-        if not any((c or {}).get("name") == "auth_token" for c in cookies if isinstance(c, dict)):
+        if not any((c or {}).get("name") == "auth_token"
+                   for c in cookies if isinstance(c, dict)):
             raise HTTPException(400, "这份登录态里没有 auth_token —— 可能是没登录成功就导出了")
         try:
             path = _browser_mod.BrowserBackend().state_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
             try:
                 os.chmod(path, 0o600)
             except Exception:
@@ -1220,30 +1610,190 @@ def create_app() -> FastAPI:
             raise HTTPException(500, f"写入失败：{type(e).__name__}: {e}")
         invalidate_backends_cache()
         n = len([c for c in cookies if isinstance(c, dict)])
-        return {"ok": True, "message": f"登录态已保存（{n} 条 cookie）", "path": str(path)}
+        return {"ok": True, "message": f"登录态已保存（{n} 条 cookie）",
+                "path": str(path), "account": _browser_mod.BrowserBackend().saved_account()}
 
     @app.get("/api/browser/state")
     async def api_browser_state():
         """看登录态是否存在（**不回传 cookie 内容**）。"""
         from core.backends import browser as _browser_mod
-        import json as _json
         be = _browser_mod.BrowserBackend()
         path = be.state_path()
         if not path.exists():
             return {"ok": True, "exists": False, "message": "尚未上传登录态"}
         try:
-            data = _json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
             names = sorted({(c or {}).get("name", "") for c in (data.get("cookies") or [])
                             if isinstance(c, dict) and (c or {}).get("name")})
             return {"ok": True, "exists": True, "cookie_names": names,
                     "has_auth": "auth_token" in names,
-                    "account": be.saved_account(),
-                    "size": path.stat().st_size}
+                    "account": be.saved_account(), "size": path.stat().st_size}
         except Exception as e:
             return {"ok": True, "exists": True, "broken": True,
                     "message": f"文件存在但读不出来：{type(e).__name__}: {e}"}
 
     # ── 媒体：上传 / 列表 / 删除 ──────────────────────────
+    # ── 梗图模板库（core/memes；合成在前端 Canvas 做）──────
+    @app.get("/api/memes")
+    async def api_memes(q: str = "", limit: int = 300):
+        """素材库列表（支持按文件名模糊搜）。"""
+        from core import memes as memes_mod
+        rows = await asyncio.to_thread(memes_mod.search, q, limit)
+        st = await asyncio.to_thread(memes_mod.stats)
+        return {"ok": True, "templates": rows, "stats": st}
+
+    @app.post("/api/memes/upload")
+    async def api_memes_upload(file: UploadFile = File(...)):
+        """上传一张梗图底图，存进 DATA_DIR/memes/。"""
+        from core import memes as memes_mod
+        raw = await file.read()
+        ok, msg, name = await asyncio.to_thread(
+            memes_mod.save_template, file.filename or "", raw)
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg, "name": name,
+                "url": f"/api/memes/file?name={name}"}
+
+    @app.get("/api/memes/file")
+    async def api_memes_file(name: str):
+        from core import memes as memes_mod
+        p = await asyncio.to_thread(memes_mod.template_path, name)
+        if p is None:
+            raise HTTPException(404, "模板不存在")
+        return FileResponse(p)
+
+    @app.post("/api/memes/delete")
+    async def api_memes_delete(body: MemeNameIn):
+        from core import memes as memes_mod
+        ok, msg = await asyncio.to_thread(memes_mod.delete_template, body.name)
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg}
+
+    # ── 梗图草稿（存「底图 + 图层位置样式」，随时接着改）──
+    @app.get("/api/memes/drafts")
+    async def api_drafts():
+        from core import memes as memes_mod
+        return {"ok": True, "drafts": await asyncio.to_thread(memes_mod.list_drafts)}
+
+    @app.get("/api/memes/drafts/get")
+    async def api_draft_get(id: str):
+        from core import memes as memes_mod
+        d = await asyncio.to_thread(memes_mod.get_draft, id)
+        if d is None:
+            raise HTTPException(404, "草稿不存在")
+        return {"ok": True, "draft": d}
+
+    @app.post("/api/memes/drafts")
+    async def api_draft_save(body: dict):
+        from core import memes as memes_mod
+        ok, msg, did = await asyncio.to_thread(memes_mod.save_draft, body or {})
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg, "id": did, "name": (body or {}).get("name") or did}
+
+    @app.post("/api/memes/drafts/delete")
+    async def api_draft_delete(body: MemeNameIn):
+        from core import memes as memes_mod
+        ok, msg = await asyncio.to_thread(memes_mod.delete_draft, body.name)
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg}
+
+    # ── 采集：从社交平台抓热门梗图 → 筛选 → 转发布 ────────
+    @app.get("/api/collect/platforms")
+    async def api_collect_platforms():
+        """各平台采集器状态（能不能采 / 要不要登录 / 上次结果）。"""
+        from core import collect as collect_mod
+        return {"ok": True, "platforms": await asyncio.to_thread(collect_mod.describe),
+                "stats": await asyncio.to_thread(_collect_stats)}
+
+    @app.post("/api/collect/run")
+    async def api_collect_run(body: CollectRunIn):
+        """跑一次采集（要开浏览器，几十秒）。后台执行，前端轮询 /status。"""
+        started, msg = start_collect(body.platform or "xiaohongshu",
+                                     pages=body.pages or 2, keyword=body.keyword or "")
+        if not started:
+            raise HTTPException(409, msg)
+        return {"ok": True, "message": msg, "progress": collect_progress()}
+
+    @app.get("/api/collect/status")
+    async def api_collect_status():
+        return {"ok": True, "progress": collect_progress()}
+
+    @app.get("/api/collect/items")
+    async def api_collect_items(platform: str = "", min_likes: int = 0,
+                                min_comments: int = 0, unused_only: bool = False,
+                                limit: int = 100):
+        """采集结果（按热度倒序）。"""
+        from core.collect import store as cs
+        rows = await asyncio.to_thread(
+            cs.list_items, platform=platform, min_likes=min_likes,
+            min_comments=min_comments, unused_only=unused_only, limit=limit)
+        return {"ok": True, "items": rows, "stats": await asyncio.to_thread(cs.stats)}
+
+    @app.post("/api/collect/publish")
+    async def api_collect_publish(body: CollectPublishIn):
+        """把一条采集结果发到 X（下载图片 → 进现有发布队列）。"""
+        from core.collect import store as cs
+        ok, msg, jid = await asyncio.to_thread(
+            cs.publish_item, body.key, text=body.text or "",
+            with_source=bool(body.with_source), immediately=bool(body.immediately))
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg, "job_id": jid}
+
+    @app.post("/api/collect/delete")
+    async def api_collect_delete(body: CollectKeyIn):
+        """从采集库里删掉一条。"""
+        from core.collect import store as cs
+        try:
+            cs.init_db()
+            with queue.db() as con:
+                con.execute("DELETE FROM collected WHERE key=?", (body.key,))
+            return {"ok": True, "message": "已删除"}
+        except Exception as e:
+            raise HTTPException(500, f"删除失败：{type(e).__name__}") from e
+
+    # ── 扫码登录（小红书这类需要登录的平台）───────────────
+    @app.post("/api/collect/login/start")
+    async def api_collect_login_start(body: CollectLoginIn):
+        """开始扫码登录，返回二维码 dataURL（前端直接 <img src>）。"""
+        from core import collect as collect_mod
+        col = collect_mod.get_collector(body.platform or "")
+        if col is None or not hasattr(col, "login_start"):
+            raise HTTPException(400, f"{body.platform} 不支持扫码登录")
+        ok, msg, qr = await asyncio.to_thread(col.login_start)
+        if not ok:
+            raise HTTPException(400, msg)
+        return {"ok": True, "message": msg, "qr": qr,
+                "status": await asyncio.to_thread(col.login_status)}
+
+    @app.get("/api/collect/login/status")
+    async def api_collect_login_status(platform: str):
+        from core import collect as collect_mod
+        col = collect_mod.get_collector(platform)
+        if col is None or not hasattr(col, "login_status"):
+            raise HTTPException(400, f"{platform} 不支持扫码登录")
+        return {"ok": True, "status": await asyncio.to_thread(col.login_status)}
+
+    @app.post("/api/collect/login/cancel")
+    async def api_collect_login_cancel(body: CollectLoginIn):
+        from core import collect as collect_mod
+        col = collect_mod.get_collector(body.platform or "")
+        if col is not None and hasattr(col, "login_cancel"):
+            await asyncio.to_thread(col.login_cancel)
+        return {"ok": True, "message": "已取消"}
+
+    @app.post("/api/collect/logout")
+    async def api_collect_logout(body: CollectLoginIn):
+        from core import collect as collect_mod
+        col = collect_mod.get_collector(body.platform or "")
+        if col is None or not hasattr(col, "logout"):
+            raise HTTPException(400, f"{body.platform} 不支持")
+        ok, msg = await asyncio.to_thread(col.logout)
+        return {"ok": bool(ok), "message": msg}
+
     @app.post("/api/media/upload")
     async def api_media_upload(file: UploadFile = File(...)):
         """上传图片/视频，落 MEDIA_DIR，返回可拿去投料的相对名。"""
@@ -1352,8 +1902,10 @@ def create_app() -> FastAPI:
         # 注意：password 只作为参数传入线程，不写日志、不入库、不回显。
         threading.Thread(
             target=_login_password_worker,
-            args=(name, username, password, (body.code or "").strip()),
-            name=f"login-pw-{name}", daemon=True,
+            args=(name, accounts.current_account(), username, password,
+                  (body.code or "").strip()),
+            name=f"login-pw-{accounts.current_account() or 'legacy'}-{name}",
+            daemon=True,
         ).start()
         return {
             "ok": True, "started": True, "backend": name,
@@ -1362,6 +1914,43 @@ def create_app() -> FastAPI:
             "message": ("已开始账号密码登录（后台进行）。若 X 要求验证码，"
                         "流程会停下并在此提示你填入。"),
         }
+
+    # ── 数据日报（core/analytics）────────────────────────
+    @app.get("/api/analytics/summary")
+    async def api_analytics_summary(days: int = 92):
+        """日报主数据：今日实时 + 最新完整日（认证/普通拆分）+ 近 N 天。"""
+        return await asyncio.to_thread(analytics.summary, max(1, min(days, 400)))
+
+    @app.get("/api/analytics/day")
+    async def api_analytics_day(day: str = ""):
+        """指定某一天的账号级指标 + 当天推文。"""
+        return await asyncio.to_thread(analytics.daily, day or None)
+
+    @app.get("/api/analytics/tweets")
+    async def api_analytics_tweets(day: str = "", days: int = 0, limit: int = 300):
+        rows = await asyncio.to_thread(
+            analytics.tweets, day or None,
+            days=(days or None), limit=max(1, min(limit, 1000)))
+        return {"ok": True, "tweets": rows}
+
+    @app.get("/api/analytics/tweet/{tweet_id}")
+    async def api_analytics_tweet(tweet_id: str):
+        row = await asyncio.to_thread(analytics.tweet, tweet_id)
+        if row is None:
+            raise HTTPException(404, f"推文 {tweet_id} 还没采集到，先点「刷新数据」")
+        return {"ok": True, "tweet": row}
+
+    @app.get("/api/analytics/status")
+    async def api_analytics_status():
+        return {"ok": True, "progress": analytics_progress()}
+
+    @app.post("/api/analytics/refresh")
+    async def api_analytics_refresh(days: int = 92):
+        """后台开一次采集（要开浏览器，几十秒）。前端轮询 /status 看进度。"""
+        started, msg = start_analytics_refresh(days)
+        if not started:
+            raise HTTPException(409, msg)
+        return {"ok": True, "message": msg, "progress": analytics_progress()}
 
     # ── 暂停 / 设置 ──────────────────────────────────────
     @app.post("/api/pause")
@@ -1398,10 +1987,24 @@ def create_app() -> FastAPI:
             v = str(body.tg_allowed_users).strip()
             if len(v) > 500:
                 raise HTTPException(400, "tg_allowed_users 过长（≤500 字符）")
-            # 只允许数字、逗号、空白与 - 号，防止塞进奇怪内容
-            if v and not re.fullmatch(r"[0-9,\s\-]+", v):
-                raise HTTPException(400, "tg_allowed_users 只能填 user id（数字），用逗号分隔")
-            items["tg_allowed_users"] = v
+            # 允许直接写 @用户名 —— 在服务端换算出数字 id 再存
+            # （机器人白名单只认数字 id，让人去记一长串数字太反人类）
+            ids: list[str] = []
+            bad: list[str] = []
+            for tok in split_id_tokens(v):
+                if re.fullmatch(r"-?\d+", tok):
+                    ids.append(tok)
+                    continue
+                r = await asyncio.to_thread(resolve_tg_chat, tok)
+                if r.get("ok") and r.get("id") is not None:
+                    ids.append(str(r["id"]))
+                else:
+                    bad.append(f"{tok}（{r.get('error') or '解析失败'}）")
+            if bad:
+                raise HTTPException(
+                    400, "这些管理员没能换算成 user id：" + "、".join(bad) +
+                         "。可以让对方先给机器人发一句 /start，再重试。")
+            items["tg_allowed_users"] = ",".join(dict.fromkeys(ids))
         if body.tg_allowed_chats is not None:
             v = str(body.tg_allowed_chats).strip()
             if len(v) > 500:

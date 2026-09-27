@@ -49,7 +49,7 @@ from core.tgmanager import TelegramManager, mask_token  # noqa: E402
 queue.init_db()
 
 # 真 token 形状（脱敏测试用；其实只是字符串，不会发出去）
-GOOD_TOKEN = "000000000:FAKE_TOKEN_FOR_UNIT_TESTS_ONLY"
+GOOD_TOKEN = "123456789:AAHfakeTokenForUnitTest_xyzABC"
 BAD_TOKEN = "123456789:AAHdefinitelyRevoked_xyzABC"
 
 
@@ -750,7 +750,23 @@ class BotModuleWiringTest(unittest.TestCase):
         settings.set_many({
             "tg_token": "", "tg_allowed_users": "", "tg_allowed_chats": "",
         })
+        self._reset_admins()
         self.bot = self._import_bot()
+
+    @staticmethod
+    def _reset_admins() -> None:
+        """2026-09-26 起「白名单」的真身是 tg_admins 列表，不清它用例之间会串台
+        （settings 里那串数字会被迁移进列表，然后留在库里）。"""
+        try:
+            from core import queue
+            with queue.db() as con:
+                for t in ("tg_admins", "tg_signups"):
+                    try:
+                        con.execute(f"DELETE FROM {t}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def tearDown(self) -> None:
         from core import config
@@ -758,6 +774,7 @@ class BotModuleWiringTest(unittest.TestCase):
         settings.set_many({
             "tg_token": "", "tg_allowed_users": "", "tg_allowed_chats": "",
         })
+        self._reset_admins()
 
     @staticmethod
     def _import_bot():
@@ -790,15 +807,25 @@ class BotModuleWiringTest(unittest.TestCase):
     # ── 白名单：settings 优先，空则回落 config ───────────
 
     def test_whitelist_prefers_settings(self):
+        """老字段 settings.tg_allowed_users 会被**迁移**成管理员列表。
+
+        2026-09-26 起白名单的真身是 tg_admins 列表（有名字/加入时间/审批人），
+        settings 里那串数字只在列表为空时提供种子。
+        """
         from core import config
         saved = config.ALLOWED_USERS
         config.ALLOWED_USERS = {1, 2, 3}
         try:
+            # 列表空 → 回落 config
             self.assertEqual(self.bot.allowed_users_effective(), {1, 2, 3})
+            # 老字段有值 → 迁移进列表，以列表为准
             settings.set_many({"tg_allowed_users": "9, 10"})
             self.assertEqual(self.bot.allowed_users_effective(), {9, 10})
-            # 清空即回落 config
+            # 迁移后列表说了算：清空老字段不再影响生效值（这正是列表化的目的）
             settings.set_many({"tg_allowed_users": ""})
+            self.assertEqual(self.bot.allowed_users_effective(), {9, 10})
+            # 把列表清掉才回到 config
+            self._reset_admins()
             self.assertEqual(self.bot.allowed_users_effective(), {1, 2, 3})
         finally:
             config.ALLOWED_USERS = saved
@@ -816,8 +843,13 @@ class BotModuleWiringTest(unittest.TestCase):
             config.ALLOWED_CHATS = saved
 
     def test_whitelist_ignores_garbage(self):
+        """只认**正数** user id —— 字母/空项/@xxx/负数都不是 Telegram 用户。
+
+        （负数在 Telegram 里代表群/频道，那是 tg_allowed_chats 的范畴；
+         管理员永远是人，所以负数会被丢掉。）
+        """
         settings.set_many({"tg_allowed_users": "abc, 12, ,@x, -3"})
-        self.assertEqual(self.bot.allowed_users_effective(), {12, -3})
+        self.assertEqual(self.bot.allowed_users_effective(), {12})
 
     # ── _authorized 行为保留 ────────────────────────────
 
@@ -852,7 +884,7 @@ class BotModuleWiringTest(unittest.TestCase):
         try:
             ok, why = asyncio.run(self.bot._authorized(self._fake_update(user_id=7)))
             self.assertIs(ok, False)
-            self.assertIn("ALLOWED_USERS", why)
+            self.assertIn("管理员列表", why)
             ok2, _ = asyncio.run(self.bot._authorized(self._fake_update(user_id=42)))
             self.assertIs(ok2, True)
         finally:
@@ -871,11 +903,11 @@ class BotModuleWiringTest(unittest.TestCase):
             config.ALLOWED_USERS, config.ALLOWED_CHATS = saved_u, saved_c
 
     def test_authorized_settings_whitelist_is_enforced(self):
-        """settings 里配了白名单 → 立刻生效（无需重启进程）。"""
+        """settings 里的老白名单会被迁移成管理员列表 → 立刻生效（无需重启进程）。"""
         settings.set_many({"tg_allowed_users": "555"})
         ok, why = asyncio.run(self.bot._authorized(self._fake_update(user_id=1)))
         self.assertIs(ok, False)
-        self.assertIn("ALLOWED_USERS", why)
+        self.assertIn("管理员列表", why)
         # 放行白名单内的人
         ok2, why2 = asyncio.run(self.bot._authorized(self._fake_update(user_id=555)))
         self.assertIs(ok2, True)
@@ -1273,3 +1305,534 @@ def test_content_hash_includes_media_name(tmp_path):
     assert a != b, "不同图片必须得到不同指纹"
     same = textutil.content_hash("photo", "hello", "", "imgA.jpg")
     assert a == same, "同样的图+文字应得到相同指纹（去重要生效）"
+
+
+# ══════════════════════════════════════════════════════════
+# 评论（回复）：会话状态机
+# ══════════════════════════════════════════════════════════
+
+def test_reply_state_is_per_chat():
+    """评论流程状态按会话记，且取出后即清除。"""
+    import bot
+    bot._reply_state.clear()
+    bot._mark_reply(111, "text")
+    st = bot._peek_reply(111)
+    assert st["stage"] == "link" and st["mode"] == "text"
+    # 另一个会话不受影响
+    assert bot._peek_reply(222) == {}
+    bot._set_reply_target(111, "1234567890")
+    assert bot._peek_reply(111)["stage"] == "choose"
+    assert bot._peek_reply(111)["target"] == "1234567890"
+    got = bot._take_reply(111)
+    assert got["target"] == "1234567890"
+    assert bot._peek_reply(111) == {}, "取出后必须清掉，否则下一条消息会被误当评论"
+
+
+def test_enqueue_album_keeps_reply_target():
+    """图文评论走相册聚合时，回复目标不能被丢掉。"""
+    import asyncio
+    import bot
+    from core import queue, media as media_mod, reply as reply_mod
+
+    bot._albums.clear()
+    queue.init_db()
+    before = len(queue.recent(limit=200))
+    msgs = [_fake_album_msg(201, "图片评论文字"), _fake_album_msg(202)]
+
+    async def run():
+        await bot._enqueue_album(msgs, quote_id=reply_mod.make_reply_target("1234567890"),
+                                 op="reply")
+    asyncio.run(run())
+
+    rows = queue.recent(limit=200)
+    assert len(rows) == before + 1
+    row = rows[0]
+    assert reply_mod.is_reply_target(row["quote_id"]), "评论目标必须保留"
+    assert reply_mod.reply_target_id(row["quote_id"]) == "1234567890"
+    assert len(media_mod.parse_media_paths(row["media_path"])) == 2
+
+
+def test_apply_edit_keeps_reply_target():
+    """改评论文字时不能把回复目标冲掉 —— 否则评论会变成一条孤儿帖。"""
+    import asyncio
+    import types
+    import bot
+    from core import queue, reply as reply_mod
+
+    queue.init_db()
+    jid = queue.enqueue(
+        tg_chat_id=1, tg_msg_id=9001, kind="text", raw_text="原评论",
+        quote_id=reply_mod.make_reply_target("1234567890"),
+        status="awaiting",
+    )
+    assert jid is not None
+    msg = types.SimpleNamespace(text="改过的评论", chat_id=1, message_id=9002,
+                                replies=[])
+
+    async def _reply(text, **kw):
+        msg.replies.append((text, kw))
+    msg.reply_text = _reply
+
+    asyncio.run(bot._apply_edit(jid, msg))
+
+    row = queue.get(jid)
+    assert row["raw_text"] == "改过的评论"
+    assert reply_mod.is_reply_target(row["quote_id"]), "改文字后评论目标必须还在"
+    assert reply_mod.reply_target_id(row["quote_id"]) == "1234567890"
+
+
+# ══════════════════════════════════════════════════════════
+# 推文操作流程（转帖 / 引用 / 评论）
+# ══════════════════════════════════════════════════════════
+
+def test_reply_quote_id_maps_three_ops():
+    """三种操作 -> 三种 quote_id 编码；不能互相串。"""
+    import bot
+
+    base = {"target": "1234567890"}
+    assert bot._reply_quote_id({**base, "op": "retweet"}) == "t:1234567890"
+    assert bot._reply_quote_id({**base, "op": "reply"}) == "r:1234567890"
+    assert bot._reply_quote_id({**base, "op": "quote"}) == "1234567890"
+    # 缺目标或未知操作 -> 空串（调用方必须当成流程不完整，退回普通发帖是错的）
+    assert bot._reply_quote_id({"op": "reply"}) == ""
+    assert bot._reply_quote_id({**base, "op": ""}) == ""
+    assert bot._reply_quote_id({**base, "op": "wat"}) == ""
+
+
+def test_mark_reply_with_choose_stage():
+    """用户直接粘链接进来：stage 直接是 choose，op 还是空的（等用户点）。"""
+    import bot
+    bot._reply_state.clear()
+    bot._mark_reply(333, target="1234567890", stage="choose", src=42)
+    st = bot._peek_reply(333)
+    assert st["stage"] == "choose"
+    assert st["target"] == "1234567890"
+    assert st["src"] == 42
+    assert st["op"] == "", "还没点操作，op 必须是空的"
+    bot._take_reply(333)
+
+
+def test_set_reply_op_moves_to_content_stage():
+    import bot
+    bot._reply_state.clear()
+    bot._mark_reply(444, target="1234567890", stage="choose")
+    bot._set_reply_op(444, "reply", "media")
+    st = bot._peek_reply(444)
+    assert st["stage"] == "content"
+    assert st["op"] == "reply"
+    assert st["mode"] == "media"
+    bot._take_reply(444)
+
+
+def test_target_line_labels_three_kinds():
+    """用户看到的说明必须能分清转帖/引用/评论。"""
+    import bot
+    assert bot._target_line("t:123").startswith("🔄 转帖")
+    assert bot._target_line("r:123").startswith("💬 评论")
+    assert bot._target_line("123").startswith("✏️ 引用")
+    assert bot._target_line("") == ""
+    assert bot._target_line(None) == ""
+    assert "https://x.com/i/status/123" in bot._target_line("t:123")
+
+
+def test_job_tag_labels_retweet_not_text():
+    """转帖没有正文也没媒体，绝不能显示成「📝 纯文字」。"""
+    import bot
+
+    class Row(dict):
+        def keys(self):
+            return super().keys()
+
+    rt = Row(id=1, quote_id="t:123", media_path="", raw_text="", status="pending")
+    assert "转帖" in bot._job_tag(rt)
+    assert "纯文字" not in bot._job_tag(rt)
+
+    rp = Row(id=2, quote_id="r:123", media_path="", raw_text="评论", status="pending")
+    assert bot._job_tag(rp).startswith("💬")
+
+    qt = Row(id=3, quote_id="123", media_path="", raw_text="引用文字", status="pending")
+    assert "转帖" not in bot._job_tag(qt)
+    assert not bot._job_tag(qt).startswith("💬")
+
+
+def test_enqueue_retweet_creates_text_job_with_retweet_target():
+    """转帖入队：kind 保持 text（没有正文），quote_id 是 t:<id>，状态是 awaiting。"""
+    import asyncio
+    import bot
+    from core import queue, reply as reply_mod
+
+    queue.init_db()
+    bot._reply_state.clear()
+    bot._mark_reply(777, target="1799888777666555444", stage="choose", src=8888)
+    msg = _fake_album_msg(9999, "", gid="", chat_id=777)
+    msg.photo = None       # 转帖不是相册消息
+    before = len(queue.recent(limit=300))
+
+    asyncio.run(bot._enqueue_retweet(msg, bot._peek_reply(777)))
+
+    rows = queue.recent(limit=300)
+    assert len(rows) == before + 1
+    row = rows[0]
+    assert reply_mod.is_retweet_target(row["quote_id"])
+    assert reply_mod.retweet_target_id(row["quote_id"]) == "1799888777666555444"
+    assert row["kind"] == "text"
+    assert not (row["raw_text"] or "").strip(), "转帖不能有正文"
+    assert not row["media_path"], "转帖不能有媒体"
+    # 流程状态必须被清掉，否则下一条消息会被误当转帖
+    assert bot._peek_reply(777) == {}
+
+
+def test_enqueue_retweet_uses_source_message_for_dedup():
+    """同一条链接消息重投 -> 唯一键拦住，不会转推两次。"""
+    import asyncio
+    import bot
+    from core import queue
+
+    queue.init_db()
+    bot._reply_state.clear()
+    bot._mark_reply(778, target="111122223333", stage="choose", src=55501)
+    msg = _fake_album_msg(55501, "", gid="", chat_id=778)
+    msg.photo = None
+
+    asyncio.run(bot._enqueue_retweet(msg, bot._peek_reply(778)))
+    before = len(queue.recent(limit=300))
+
+    # Telegram 重投同一条链接消息：src 相同 -> 入队被唯一键拒绝
+    bot._mark_reply(778, target="111122223333", stage="choose", src=55501)
+    asyncio.run(bot._enqueue_retweet(msg, bot._peek_reply(778)))
+
+    assert len(queue.recent(limit=300)) == before, "重投不能产生第二条转帖任务"
+
+
+# ══════════════════════════════════════════════════════════
+# 消息路由：直接粘链接 -> 先问「转帖 / 引用 / 评论」
+# ══════════════════════════════════════════════════════════
+
+def _fake_text_msg(text, mid=5001, chat_id=901, from_user_id=901):
+    """构造一条纯文字消息 + 最小 Update（够 _on_message_inner 用）。"""
+    import types
+
+    msg = types.SimpleNamespace()
+    msg.message_id = mid
+    msg.chat_id = chat_id
+    msg.chat = types.SimpleNamespace(id=chat_id)
+    msg.text = text
+    msg.caption = ""
+    msg.photo = None
+    msg.video = None
+    msg.document = None
+    msg.media_group_id = None
+    msg.from_user = types.SimpleNamespace(id=from_user_id)
+    msg.replies = []
+
+    async def _reply(t, **kw):
+        msg.replies.append((t, kw))
+        return types.SimpleNamespace(message_id=99999)
+    msg.reply_text = _reply
+
+    upd = types.SimpleNamespace()
+    upd.effective_message = msg
+    upd.effective_chat = types.SimpleNamespace(id=chat_id)
+    return upd, msg
+
+
+def test_bare_tweet_link_asks_what_to_do_instead_of_quoting(monkeypatch):
+    """核心交互：粘一条链接 -> **先问**要做什么，而不是直接当引用发出去。
+
+    改动前这里会把链接正文里的 id 直接当成引用目标，入队一条引用推文 ——
+    用户根本还没说要对这条推文做什么。
+    """
+    import asyncio
+    import bot
+    from core import queue
+
+    queue.init_db()
+    bot._reply_state.clear()
+    bot._send_mode.clear()
+    before = len(queue.recent(limit=400))
+    upd, msg = _fake_text_msg("https://x.com/someone/status/1234567890", mid=7001, chat_id=911)
+
+    asyncio.run(bot._on_message_inner(upd, None))
+
+    # 1) 一条任务都不该入队 —— 还没选操作
+    assert len(queue.recent(limit=400)) == before, "选操作之前不能入队"
+    # 2) 等用户点操作，目标已经锁定
+    st = bot._peek_reply(911)
+    assert st.get("stage") == "choose"
+    assert st.get("target") == "1234567890"
+    # 3) 三个按钮都在
+    assert msg.replies, "必须回一条「要做什么」的消息"
+    text, kw = msg.replies[-1]
+    markup = kw.get("reply_markup")
+    datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert "op:retweet" in datas
+    assert "op:quote" in datas
+    assert "op:reply" in datas
+    bot._reply_state.clear()
+
+
+def test_link_with_surrounding_text_still_quotes(monkeypatch):
+    """链接夹在正文里（"看看这条 …… 说得对吗"）是正常的引用发帖，别拦。"""
+    import asyncio
+    import bot
+    from core import queue
+
+    queue.init_db()
+    bot._reply_state.clear()
+    bot._send_mode.clear()
+    before = len(queue.recent(limit=400))
+    upd, msg = _fake_text_msg("看看这条 https://x.com/someone/status/1234567890 说得对吗", mid=7002, chat_id=912)
+
+    asyncio.run(bot._on_message_inner(upd, None))
+
+    assert len(queue.recent(limit=400)) == before + 1, "这种应该照常入队为引用"
+    assert bot._peek_reply(912) == {}, "不该进入推文操作流程"
+
+
+def test_send_flow_link_is_content_not_target(monkeypatch):
+    """点了「📤 发送 → 纯文字」后再发链接：那是**正文**，不是操作目标。"""
+    import asyncio
+    import bot
+    from core import queue
+
+    queue.init_db()
+    bot._reply_state.clear()
+    bot._send_mode.clear()
+    bot._mark_send_mode(913, "text")
+    before = len(queue.recent(limit=400))
+    upd, msg = _fake_text_msg("https://x.com/someone/status/1234567890", mid=7003, chat_id=913)
+
+    asyncio.run(bot._on_message_inner(upd, None))
+
+    assert len(queue.recent(limit=400)) == before + 1, "发送流程里的链接应当作正文发布"
+    assert bot._peek_reply(913) == {}
+
+
+def test_link_stage_then_action_panel(monkeypatch):
+    """点「转帖 / 引用 / 评论」入口 -> 先要链接；发链接后弹操作面板。"""
+    import asyncio
+    import bot
+
+    bot._reply_state.clear()
+    bot._send_mode.clear()
+    bot._mark_reply(902)                 # 等价于点入口后的状态
+    upd, msg = _fake_text_msg("https://x.com/a/status/9876543210", mid=6001, chat_id=902)
+
+    asyncio.run(bot._on_message_inner(upd, None))
+
+    st = bot._peek_reply(902)
+    assert st.get("stage") == "choose"
+    assert st.get("target") == "9876543210"
+    text, kw = msg.replies[-1]
+    datas = [b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row]
+    assert {"op:retweet", "op:quote", "op:reply"} <= set(datas)
+    bot._reply_state.clear()
+
+
+def test_not_a_link_keeps_asking_for_link():
+    """带图片/乱文字时不该悄悄退出流程，而要继续要链接。"""
+    import asyncio
+    import bot
+
+    bot._reply_state.clear()
+    bot._mark_reply(903)
+    upd, msg = _fake_text_msg("没有链接的一段话", mid=6002, chat_id=903)
+
+    asyncio.run(bot._on_message_inner(upd, None))
+
+    assert bot._peek_reply(903).get("stage") == "link", "还要继续等链接"
+    assert any("链接" in t for t, _ in msg.replies)
+    bot._reply_state.clear()
+
+
+def test_retweet_stage_rejects_extra_message_instead_of_posting_it():
+    """选了转帖后又发文字：绝不能静默把这段文字当成推文发出去。"""
+    import asyncio
+    import bot
+    from core import queue
+
+    queue.init_db()
+    bot._reply_state.clear()
+    bot._mark_reply(904, target="1234567890", stage="choose")
+    bot._set_reply_op(904, "retweet")
+    before = len(queue.recent(limit=400))
+    upd, msg = _fake_text_msg("这段文字不该被发出去", mid=6003, chat_id=904)
+
+    asyncio.run(bot._on_message_inner(upd, None))
+
+    assert len(queue.recent(limit=400)) == before, "转帖阶段发来的文字不该变成新推文"
+    assert bot._peek_reply(904) == {}, "流程应当被取消"
+    assert any("不需要文字" in t for t, _ in msg.replies)
+
+
+def test_text_only_reply_rejects_photo():
+    """评论选了"只发文字"，发图片要拦住（不能变成图文评论）。"""
+    import asyncio
+    import bot
+    from core import queue
+
+    queue.init_db()
+    bot._reply_state.clear()
+    bot._mark_reply(905, target="1234567890", stage="choose")
+    bot._set_reply_op(905, "reply", "text")
+    before = len(queue.recent(limit=400))
+
+    upd, msg = _fake_text_msg("", mid=6004, chat_id=905)
+    msg.text = ""
+    msg.photo = [object()]        # 有图片
+
+    asyncio.run(bot._on_message_inner(upd, None))
+
+    assert len(queue.recent(limit=400)) == before, "不该入队"
+    assert any("只发文字" in t for t, _ in msg.replies)
+    bot._reply_state.clear()
+
+
+# ══════════════════════════════════════════════════════════
+# 回归：机器人上点「🚀 发送」必须真的发出去（真 bug，2026-09-26 实测）
+#
+# 病根：`bot._pipeline` 只在 PTB 的 `post_init` 里赋值，而 PTB **只在
+# `run_polling()` 内部调 post_init**。start.py / TelegramManager 走的是
+# `initialize() → start() → updater.start_polling()`，这条路径 post_init
+# 永不执行，于是 `get_pipeline()` 恒为 None。用户在机器人上点「发送」，
+# 回调只把任务 mark 成 pending 就回一句"稍后自动发出"；而此时若
+# `queue_send_enabled=0`（只手动发），主循环永远跳过它 —— 任务永久卡在
+# 「待发」，点几次都没用。
+# ══════════════════════════════════════════════════════════
+
+def _fake_pub_callback(job_id, chat_id=906):
+    """构造一个 `pub:<id>` 的回调 Update（够 on_callback 的 pub 分支用）。"""
+    import types
+
+    msg = types.SimpleNamespace()
+    msg.chat = types.SimpleNamespace(id=chat_id)
+    msg.chat_id = chat_id
+    msg.message_id = 8001
+    msg.replies = []
+
+    async def _reply(t, **kw):
+        msg.replies.append((t, kw))
+        return types.SimpleNamespace(message_id=99998)
+    msg.reply_text = _reply
+
+    async def _edit(**kw):
+        return True
+    msg.edit_message_reply_markup = _edit
+
+    q = types.SimpleNamespace()
+    q.data = f"pub:{job_id}"
+    q.message = msg
+    q.from_user = types.SimpleNamespace(id=chat_id)
+
+    async def _answer(*a, **kw):
+        return True
+    q.answer = _answer
+
+    upd = types.SimpleNamespace()
+    upd.callback_query = q
+    upd.effective_message = msg
+    upd.effective_chat = types.SimpleNamespace(id=chat_id)
+    return upd, msg
+
+
+def test_get_pipeline_falls_back_to_web_registered_instance():
+    """start.py 注册在 web.server 里的常驻 pipeline，get_pipeline() 必须能取到。
+
+    这就是病根所在：start.py 用 `set_pipeline_instance(pipe)` 注入控制台，
+    但机器人回调读的是 `bot._pipeline`（post_init 才赋值，永不执行）。
+    两边必须打通，否则机器人的「发送」永远拿不到 pipeline。
+    """
+    import importlib.util
+    from web import server as web_server
+
+    spec = importlib.util.spec_from_file_location("_bot_pipe_test", ROOT / "bot.py")
+    botmod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(botmod)
+
+    sentinel = object()
+    saved_bot_pipe = botmod._pipeline
+    saved_web_pipe = getattr(web_server, "_pipe_obj", None)
+    try:
+        botmod._pipeline = None
+        web_server.set_pipeline_instance(sentinel)
+        assert botmod.get_pipeline() is sentinel, (
+            "get_pipeline() 必须回落到 web.server 里注册的常驻实例，"
+            "否则机器人点「发送」拿不到 pipeline，任务会永久卡在待发")
+    finally:
+        botmod._pipeline = saved_bot_pipe
+        web_server.set_pipeline_instance(saved_web_pipe)
+
+
+def test_ensure_pipeline_creates_and_remembers():
+    """get_pipeline() 拿不到时，ensure_pipeline() 要现场造一个并记住。"""
+    import importlib.util
+    from core.pipeline import Pipeline
+    from web import server as web_server
+
+    spec = importlib.util.spec_from_file_location("_bot_pipe_test2", ROOT / "bot.py")
+    botmod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(botmod)
+
+    saved_bot_pipe = botmod._pipeline
+    saved_web_pipe = getattr(web_server, "_pipe_obj", None)
+    try:
+        botmod._pipeline = None
+        web_server.set_pipeline_instance(None)
+        pipe = botmod.ensure_pipeline(None)
+        assert isinstance(pipe, Pipeline), "应当现场构造出 Pipeline"
+        assert botmod.get_pipeline() is pipe, "构造后要记住，下次复用同一个"
+    finally:
+        botmod._pipeline = saved_bot_pipe
+        web_server.set_pipeline_instance(saved_web_pipe)
+
+
+def test_pub_callback_publishes_even_without_registered_pipeline(monkeypatch):
+    """机器人点「🚀 发送」：没有常驻 pipeline 时也必须真发，不能只 mark 成 pending。
+
+    回归的病根行为：回调里 `pipe is None` 就回一句"稍后自动发出"并 return，
+    任务永远停在待发（queue_send_enabled=0 时主循环不取）。
+    修好后：拿不到 pipeline 就 ensure_pipeline() 现场建一个，把这条发出去。
+    """
+    import asyncio
+    import importlib.util
+    import bot
+    from core import queue, settings
+    from core.backends.base import PublishResult
+    from web import server as web_server
+
+    queue.init_db()
+    settings.set_many({"queue_send_enabled": "0"})   # 只手动发：主循环不取 pending
+
+    jid = queue.enqueue(kind="text", tg_chat_id=906, tg_msg_id=8002,
+                        raw_text="回归：这条必须真发出去", status="awaiting")
+    assert jid is not None
+
+    published = []
+
+    async def fake_publish_one(self, job_id):
+        published.append(int(job_id))
+        queue.mark(int(job_id), "sent", tweet_id="1", tweet_url="https://x.com/i/status/1")
+        return PublishResult(ok=True, backend="fake", tweet_id="1",
+                             tweet_url="https://x.com/i/status/1")
+
+    saved_bot_pipe = bot._pipeline
+    saved_web_pipe = getattr(web_server, "_pipe_obj", None)
+    monkeypatch.setattr(bot.Pipeline, "publish_one", fake_publish_one)
+    try:
+        bot._pipeline = None                          # 模拟 post_init 没跑过
+        web_server.set_pipeline_instance(None)
+
+        upd, msg = _fake_pub_callback(jid)
+        asyncio.run(bot.on_callback(upd, None))
+
+        assert published == [jid], (
+            "点「发送」必须真的调用 publish_one；否则任务会永久卡在待发")
+        assert queue.get(jid)["status"] == "sent", "发完状态应当是 sent"
+        assert any("已发布" in t for t, _ in msg.replies), "应当回一条成功回执"
+    finally:
+        bot._pipeline = saved_bot_pipe
+        web_server.set_pipeline_instance(saved_web_pipe)
+        try:
+            queue.cancel(jid)
+        except Exception:
+            pass

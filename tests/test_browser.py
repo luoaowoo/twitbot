@@ -16,6 +16,7 @@ import json
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -321,6 +322,25 @@ def test_is_create_tweet_request():
         FakeResponse(url="https://x.com/i/api/graphql/abc/FavoriteTweet")) is False
 
 
+def test_is_create_retweet_request_is_separate_from_create_tweet():
+    """转帖走 `/CreateRetweet`，**必须**跟 CreateTweet 分开判定。
+
+    混在一起的后果：转帖会抓到发帖回包（或反过来），拿到错的 id 还报成功。
+    """
+    rt = FakeResponse(url="https://x.com/i/api/graphql/abc/CreateRetweet")
+    assert B._is_create_retweet_request(rt) is True
+    # CreateTweet 的响应绝不能被认成转帖
+    assert B._is_create_retweet_request(FakeResponse()) is False
+    assert B._is_create_retweet_request(
+        FakeResponse(url="https://x.com/i/api/graphql/abc/FavoriteTweet")) is False
+    # 反过来：转帖响应也绝不能被认成发帖
+    assert B._is_create_tweet_request(rt) is False
+    # 非 POST（如 GET 时间线）不算
+    get_resp = FakeResponse(url="https://x.com/i/api/graphql/abc/CreateRetweet")
+    get_resp.request = type("Req", (), {"method": "GET"})()
+    assert B._is_create_retweet_request(get_resp) is False
+
+
 def test_classify_api_error_codes():
     assert B._classify_api_error([{"code": 187, "message": "duplicate"}])[0] == "fatal"
     assert B._classify_api_error([{"code": 344, "message": "daily limit"}])[0] == "retry"
@@ -480,6 +500,165 @@ def test_quote_without_editor_aborts_instead_of_posting_without_quote(monkeypatc
     assert r.extra.get("composer") == "quote"
     assert "引用" in r.error
     assert "中止" in r.error or "丢失引用" in r.error
+
+
+def test_reply_without_editor_aborts_instead_of_posting_without_reply(monkeypatch, dirs):
+    """评论的编辑器没出来时必须中止，绝不能发成脱离目标的孤儿帖。"""
+    write_state(dirs)
+    page = FakePage()
+    Harness(monkeypatch, page)
+    be = B.BrowserBackend()
+    monkeypatch.setattr(be, "_wait_login_state", lambda p, t: True)
+    # "回复"按钮点成功了，但编辑器始终不出现
+    monkeypatch.setattr(be, "_setup_reply", lambda p, rid: "")
+    monkeypatch.setattr(be, "_wait_editor", lambda p, t: False)
+    monkeypatch.setattr(be, "_type_text", lambda p, t: (_ for _ in ()).throw(
+        AssertionError("不得退回普通发帖路径！")))
+    monkeypatch.setattr(be, "_find_send_button", lambda p: (_ for _ in ()).throw(
+        AssertionError("不得退回普通发帖路径！")))
+
+    r = be.publish(make_job(id=52, quote_id="r:1234567890"), "hello")
+    assert r.ok is False
+    assert r.retryable is False
+    assert r.extra.get("composer") == "reply"
+    assert "评论" in r.error
+    assert "中止" in r.error or "脱离目标" in r.error
+
+
+def test_retweet_success_only_from_network_response(monkeypatch, dirs):
+    """转帖成功必须以 `CreateRetweet` 回包为准，且回执 id 是被转的原帖。"""
+    write_state(dirs)
+    payload = {"data": {"create_retweet": {"retweet_results": {"result": {"rest_id": "777"}}}}}
+    page = FakePage(expect_factory=lambda: ExpectCM(
+        value=FakeResponse(payload=payload,
+                           url="https://x.com/i/api/graphql/abc/CreateRetweet")))
+    Harness(monkeypatch, page)
+    be = B.BrowserBackend()
+    monkeypatch.setattr(be, "_wait_login_state", lambda p, t: True)
+    monkeypatch.setattr(be, "_wait_locator", lambda p, sel, t: FakeLocator(p, sel, visible=True))
+    monkeypatch.setattr(be, "_dismiss_overlays", lambda p: None)
+
+    r = be.publish(make_job(id=60, quote_id="t:1799888777666555444"), "")
+
+    assert r.ok is True
+    assert r.tweet_id == "1799888777666555444", "转帖没有新 id，必须回原帖 id"
+    assert r.extra.get("retweet_of") == "1799888777666555444"
+    assert r.extra.get("evidence_strength") == "strong"
+    # 先回首页确认登录态，随后才导航到目标推文页
+    assert page.gotos and page.gotos[-1].endswith("/i/status/1799888777666555444")
+
+
+def test_retweet_no_network_response_is_not_success(monkeypatch, dirs):
+    """点完确认但没收到 CreateRetweet 回包 -> 绝不能报成功（可能是假点击）。"""
+    write_state(dirs)
+    page = FakePage()          # 默认 expect_response 抛 PWTimeoutError
+    Harness(monkeypatch, page)
+    be = B.BrowserBackend()
+    monkeypatch.setattr(be, "_wait_login_state", lambda p, t: True)
+    monkeypatch.setattr(be, "_wait_locator", lambda p, sel, t: FakeLocator(p, sel, visible=True))
+    monkeypatch.setattr(be, "_dismiss_overlays", lambda p: None)
+
+    r = be.publish(make_job(id=61, quote_id="t:123"), "")
+
+    assert r.ok is False
+    assert r.extra.get("evidence") == "retweet_no_response"
+    assert not r.tweet_url
+
+
+def test_retweet_missing_button_reports_clearly(monkeypatch, dirs):
+    """找不到转推按钮时给出可读原因，而不是拿页面 URL 兜底当成功。"""
+    write_state(dirs)
+    page = FakePage()
+    Harness(monkeypatch, page)
+    be = B.BrowserBackend()
+    monkeypatch.setattr(be, "_wait_login_state", lambda p, t: True)
+    monkeypatch.setattr(be, "_wait_locator", lambda p, sel, t: None)
+    monkeypatch.setattr(be, "_probe_login_state", lambda p: True)
+
+    r = be.publish(make_job(id=62, quote_id="t:123"), "")
+
+    assert r.ok is False
+    assert r.extra.get("evidence") == "retweet_button_missing"
+    assert "转帖" in r.error
+    assert not r.tweet_url
+
+
+def test_retweet_api_error_is_fatal(monkeypatch, dirs):
+    """X 明确拒绝（如已转过）-> 失败且不可重试。"""
+    write_state(dirs)
+    page = FakePage(expect_factory=lambda: ExpectCM(value=FakeResponse(
+        payload={"errors": [{"code": 327, "message": "You have already retweeted this Tweet."}]},
+        url="https://x.com/i/api/graphql/abc/CreateRetweet")))
+    Harness(monkeypatch, page)
+    be = B.BrowserBackend()
+    monkeypatch.setattr(be, "_wait_login_state", lambda p, t: True)
+    monkeypatch.setattr(be, "_wait_locator", lambda p, sel, t: FakeLocator(p, sel, visible=True))
+    monkeypatch.setattr(be, "_dismiss_overlays", lambda p: None)
+
+    r = be.publish(make_job(id=63, quote_id="t:123"), "")
+
+    assert r.ok is False
+    assert r.retryable is False
+    assert "转帖被 X 拒绝" in r.error
+
+
+def test_retweet_path_does_not_open_composer(monkeypatch, dirs):
+    """转帖绝不能走发帖框 —— 走了就会变成一条自己写的推文。"""
+    write_state(dirs)
+    page = FakePage()
+    Harness(monkeypatch, page)
+    be = B.BrowserBackend()
+    monkeypatch.setattr(be, "_wait_login_state", lambda p, t: True)
+    monkeypatch.setattr(be, "_wait_locator", lambda p, sel, t: None)
+    monkeypatch.setattr(be, "_probe_login_state", lambda p: True)
+    monkeypatch.setattr(be, "_open_composer", lambda p, j: (_ for _ in ()).throw(
+        AssertionError("转帖不得打开发帖框！")))
+    monkeypatch.setattr(be, "_type_text", lambda p, t: (_ for _ in ()).throw(
+        AssertionError("转帖不得输入正文！")))
+    monkeypatch.setattr(be, "_find_send_button", lambda p: (_ for _ in ()).throw(
+        AssertionError("转帖不得点发送按钮！")))
+
+    r = be.publish(make_job(id=64, quote_id="t:123"), "")
+    assert r.ok is False          # 找不到按钮，但关键是没走发帖路径
+
+
+def test_dismiss_overlays_clicks_safe_button_only(monkeypatch, dirs):
+    """X 的推广弹窗遮罩必须被关掉，但**绝不能点到推广按钮**。"""
+    be = B.BrowserBackend()
+    clicked = []
+
+    class Btn:
+        def __init__(self, label):
+            self.label = label
+        def is_visible(self):
+            return True
+        def click(self, **kw):
+            clicked.append(self.label)
+
+    class Loc:
+        def __init__(self, sel):
+            self.sel = sel
+        def count(self):
+            # 遮罩存在；"以后再说"能匹配到，推广按钮匹配不到
+            if self.sel == B.SEL_MODAL_MASK:
+                return 1
+            if "以后再说" in self.sel:
+                return 1
+            return 0
+        def nth(self, i):
+            return Btn(self.sel)
+
+    class P:
+        url = "https://x.com/i/status/1"
+        keyboard = types.SimpleNamespace(press=lambda k: None)
+        def locator(self, sel):
+            return Loc(sel)
+        def wait_for_timeout(self, ms):
+            return None
+
+    be._dismiss_overlays(P())
+    assert clicked, "必须尝试关掉遮罩"
+    assert all("推广" not in c for c in clicked), "绝不能点到推广按钮"
 
 
 def test_publish_text_input_failure_non_retryable(monkeypatch, dirs):
@@ -1029,6 +1208,22 @@ def test_decide_strong_evidence_from_url(monkeypatch, dirs):
                 payload=None, url="https://x.com/alice/status/1811111111111111111")
     assert r.ok is True and r.tweet_id == "1811111111111111111"
     assert r.extra["evidence"] == "url"
+
+
+def test_decide_reply_url_is_not_mistaken_for_own_id(monkeypatch, dirs):
+    """评论发完后页面仍停在目标推文上 —— 绝不能把父推文 id 当成评论自己的 id。"""
+    be = B.BrowserBackend()
+    page = FakePage(url="https://x.com/alice/status/1234567890")
+    r = be._decide_result(
+        job=make_job(id=53, quote_id="r:1234567890"), text="hi", page=page,
+        shot=None, started=time.time(),
+        resp={"payload": None, "status": None, "url": ""},
+        ui={"toast": "", "toast_kind": "", "editor_cleared": False,
+            "composer_closed": False},
+        composer="reply", media_uploaded=False)
+    assert r.ok is False, "没有回包就不该报成功，更不能拿父推文 id 冒充"
+    assert r.tweet_id != "1234567890"
+    assert "1234567890" not in (r.tweet_url or "")
 
 
 def test_decide_api_duplicate_is_fatal(monkeypatch, dirs):

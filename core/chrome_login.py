@@ -221,7 +221,7 @@ def _read_account_from_browser(port: int) -> str:
     """从浏览器里读出当前登录的账号，并记进 settings。失败返回空串。
 
     用 CDP 在页面里取左下角账号切换按钮的文本（形如
-    "显示名 | @handle"）—— 这是最可靠的来源。
+    "洛嗷呜luoaowoo | @luoaowoo"）—— 这是最可靠的来源。
     """
     page = pick_page(port)
     if not page:

@@ -21,6 +21,7 @@ _TMP_ROOT = Path(tempfile.mkdtemp(prefix="twitbot-pytest-"))
 
 os.environ["DATA_DIR"] = str(_TMP_ROOT)
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ["TWITBOT_AUTH_DISABLED"] = "1"
 
 # 显式置空凭据：core.config.load_dotenv 只在「键不在 os.environ 中」时才写入，
 # 所以置空（而不是 pop）才能挡住本机真实 .env 里的凭据渗进测试。
@@ -30,9 +31,6 @@ for _k in ("X_CONSUMER_KEY", "X_CONSUMER_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_SE
 # 后端默认值也固定，避免本机 .env 干扰断言
 os.environ["BACKEND"] = "x_api"
 os.environ["MODE"] = "confirm"
-# 关闭控制台密码门：服务器版默认会要求先登录，那会让所有既有接口测试都 401。
-# 密码门本身有自己的专项测试（显式开启）。
-os.environ["WEB_PASSWORD"] = "-"
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001

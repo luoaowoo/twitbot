@@ -188,56 +188,23 @@ journalctl -u twitbot -f          # 看日志
 
 ---
 
-## 十一、控制台密码门（服务器版专属）
+## 十一、控制台多账号登录
 
-服务器版给控制台加了一道**密码门**：访问任何页面都会先要求输密码，
-登录后凭会话 Cookie 访问（密码不会出现在 URL 里）。
+服务器版控制台不再使用单独的 `WEB_PASSWORD` 管理员密码。访问控制台时直接输入业务账号密码：
 
-### 默认密码
+| 账号 | 密码 |
+|---|---|
+| `qwqcon` | `qwqcon_qwqcon` |
+| `luoaowoo` | `luoaowoo_luoaowoo` |
 
-```
-<首次启动自动生成，见 data/console-password>
-```
+两个账号的数据完全独立，队列、设置、媒体、浏览器登录态和发布循环分别保存在：
 
-### 改密码
-
-编辑 `.env`：
-
-```ini
-WEB_PASSWORD=你的新密码
+```text
+data/accounts/qwqcon/
+data/accounts/luoaowoo/
 ```
 
-或者用环境变量：
-
-```bash
-export WEB_PASSWORD='你的新密码'
-```
-
-### 关闭密码门
-
-```ini
-WEB_PASSWORD=-
-```
-
-> ⚠ 仅供内网或本地测试。公网部署**务必保留密码门**，
-> 因为控制台能直接发推、能上传登录态。
-
-### 会话有效期
-
-登录后 12 小时内有效。想立刻失效就点控制台的登出，或重启服务。
-
-### 与 WEB_TOKEN 的关系
-
-两者**可以并存**，是两道独立的门：
-
-| | 用途 | 缺点 |
-|---|---|---|
-| `WEB_PASSWORD` | 登录页 + 会话 Cookie | — |
-| `WEB_TOKEN` | `?token=xxx` 或 Bearer | token 会出现在 URL / 浏览器历史里 |
-
-服务器版**推荐用 WEB_PASSWORD**。`WEB_TOKEN` 保留兼容。
-
----
+`.env` 中的 `WEB_TOKEN` 仍保留为旧版接口兼容 token；公网控制台建议保持为空，统一使用账号登录。
 
 ## 十二、Windows 一键收集登录态
 

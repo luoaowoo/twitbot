@@ -5,348 +5,704 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>twitbot 控制台</title>
 <style>
+  /* ══ 设计基调：白底 / 细分割线 / 克制留白（对齐 hrt.mahiro.uk）══ */
   :root{
-    --bg:#0f1216; --panel:#171b21; --panel2:#1d222a; --line:#2a313b;
-    --fg:#e6eaf0; --fg2:#9aa5b4; --fg3:#6b7686;
-    --ok:#3ecf8e; --okbg:rgba(62,207,142,.13);
-    --err:#ff6b6b; --errbg:rgba(255,107,107,.13);
-    --warn:#f0b429; --warnbg:rgba(240,180,41,.13);
-    --info:#4aa8ff; --infobg:rgba(74,168,255,.13);
-    --gray:#8b95a3; --graybg:rgba(139,149,163,.13);
-    --radius:12px;
+    --bg:#ffffff; --surface:#ffffff; --sunk:#f7f6f3; --sunk2:#f2f1ee;
+    --line:#e3e1dc; --line2:#edecea;
+    --fg:#1a1916; --fg2:#6b6860; --fg3:#9e9b94;
+    --accent:#b5664c; --accent-h:#a25940; --accent-soft:#fceee8; --accent-line:#e0a38c;
+    --ok:#2f7a52;  --okbg:#eef7f1;
+    --err:#9b2c2c; --errbg:#fceeee;
+    --warn:#8a6100;--warnbg:#fdf6e6;
+    --info:#3f5f86;--infobg:#eef3f9;
+    --gray:#6b6860;--graybg:#f2f1ee;
+    --radius:14px; --radius-sm:10px; --pill:999px;
+    --sidebar:252px; --content-max:1040px;
   }
   *{box-sizing:border-box}
+  /* hidden 属性必须压得住行内 display（弹窗写了 display:flex，会盖掉 hidden）*/
+  [hidden]{display:none !important}
   html,body{margin:0;padding:0}
   body{
     background:var(--bg); color:var(--fg);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC","Hiragino Sans GB",system-ui,sans-serif;
-    font-size:14px; line-height:1.55; -webkit-font-smoothing:antialiased;
+    font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",
+                "Microsoft YaHei","PingFang SC","Hiragino Sans GB",system-ui,sans-serif;
+    font-size:15px; line-height:1.65; -webkit-font-smoothing:antialiased;
   }
-  a{color:var(--info);text-decoration:none}
+  a{color:var(--accent);text-decoration:none}
   a:hover{text-decoration:underline}
-  .wrap{max-width:1160px;margin:0 auto;padding:18px 16px 60px}
+  code{background:var(--sunk);border:1px solid var(--line2);border-radius:6px;
+       padding:1px 6px;font-size:12.5px;
+       font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}
 
-  /* ── 顶部状态栏 ── */
-  header{position:sticky;top:0;z-index:20;background:rgba(15,18,22,.94);
-         backdrop-filter:blur(8px);border-bottom:1px solid var(--line);margin:-18px -16px 18px;padding:12px 16px}
-  .hrow{max-width:1160px;margin:0 auto;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-  .brand{font-weight:700;font-size:16px;letter-spacing:.3px;display:flex;align-items:center;gap:8px}
-  .brand .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
-  .brand .dot.bad{background:var(--err);box-shadow:0 0 8px var(--err)}
-  .brand .dot.pause{background:var(--warn);box-shadow:0 0 8px var(--warn)}
-  .brand small{color:var(--fg3);font-weight:400;font-size:11px}
-  .stats{display:flex;gap:16px;flex-wrap:wrap;margin-left:auto;align-items:center}
-  .stat{display:flex;flex-direction:column;line-height:1.25;min-width:56px}
-  .stat b{font-size:15px;font-variant-numeric:tabular-nums}
-  .stat span{font-size:11px;color:var(--fg3)}
-  .stat .big{color:var(--info)}
+  /* ── 布局 ── */
+  .shell{display:flex;min-height:100vh}
+  .side{
+    width:var(--sidebar);flex:0 0 var(--sidebar);border-right:1px solid var(--line);
+    padding:26px 16px;position:sticky;top:0;height:100vh;overflow-y:auto;
+    display:flex;flex-direction:column;background:var(--surface);
+  }
+  .brand{font-weight:700;font-size:16px;display:flex;align-items:center;gap:8px;
+         padding:0 12px 22px;white-space:nowrap}
+  .brand .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:0 0 auto}
+  .brand .dot.bad{background:var(--err)}
+  .brand .dot.pause{background:var(--warn)}
+  .brand small{color:var(--fg3);font-weight:400;font-size:11px;white-space:nowrap}
+  .nav{display:flex;flex-direction:column;gap:3px}
+  .nav button{
+    display:flex;align-items:center;gap:11px;width:100%;text-align:left;
+    background:transparent;border:0;border-radius:var(--pill);
+    padding:9px 13px;color:var(--fg2);font:inherit;font-size:14px;cursor:pointer;
+    transition:background .13s,color .13s;
+  }
+  .nav button:hover{background:var(--sunk);color:var(--fg)}
+  .nav button.on{background:var(--graybg);color:var(--fg);font-weight:600}
+  .nav button .ic{width:17px;text-align:center;flex:0 0 auto;font-size:14px}
+  .nav .sep{height:1px;background:var(--line2);margin:12px 8px}
+  .sidefoot{margin-top:auto;padding:14px 12px 2px;color:var(--fg3);font-size:11.5px;
+            border-top:1px solid var(--line2)}
+  .sidefoot #btn-pause{margin-top:10px;width:100%}
 
-  /* ── 通用 ── */
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-        padding:16px;margin-bottom:16px}
-  .card>h2{margin:0 0 4px;font-size:15px;display:flex;align-items:center;gap:8px}
-  .card>h2 .hint{font-size:12px;color:var(--fg3);font-weight:400}
-  .sub{color:var(--fg2);font-size:12.5px;margin:2px 0 14px}
-  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .main{flex:1 1 auto;min-width:0;padding:34px 40px 90px}
+  .main>div,.main>section{max-width:var(--content-max)}
+  .pagehead{margin:0 0 22px}
+  .pagehead h1{margin:0;font-size:21px;font-weight:700;letter-spacing:.2px}
+  .pagehead .desc{display:block;color:var(--fg3);font-size:13px;margin-top:3px}
+
+  /* ── 顶部状态条（对齐参考站的「标签 + 大数字」）── */
+  .stats{display:flex;gap:34px;flex-wrap:wrap;align-items:flex-start;
+         padding:0 0 20px;margin-bottom:26px;border-bottom:1px solid var(--line)}
+  .stat{display:flex;flex-direction:column;line-height:1.35;min-width:56px}
+  .stat b{font-size:17px;font-variant-numeric:tabular-nums;font-weight:650}
+  .stat span{font-size:12px;color:var(--fg3)}
+  .stat .big{color:var(--accent)}
+
+  /* ── 区块：参考站是「标题 + 分隔行」，没有卡片盒子 ── */
+  .card{background:transparent;border:0;border-radius:0;padding:0;
+        margin:0 0 34px;box-shadow:none}
+  .card>h2{margin:0 0 2px;font-size:16.5px;font-weight:700;
+           display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+  .card>h2 .hint{font-size:12.5px;color:var(--fg3);font-weight:400}
+  .sub{color:var(--fg2);font-size:13px;margin:2px 0 16px}
+  .section{display:none}
+  .section.on{display:block}
+  /* 真正需要「盒子」的地方（后端卡 / 图库缩略图）才用 */
+  .panel{border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px}
+
+  /* ── 设置行（label 左 / 控件右 / 细线分隔）── */
+  .setrow{display:flex;align-items:center;gap:18px;justify-content:space-between;
+          padding:15px 0;border-bottom:1px solid var(--line2)}
+  .setrow:last-child{border-bottom:0}
+  .setrow>.lab{font-size:14px;min-width:0}
+  .setrow>.lab small{display:block;color:var(--fg3);font-size:12px;margin-top:1px;line-height:1.5}
+  .setrow>.ctl{flex:0 0 auto;display:flex;align-items:center;gap:8px}
+  .setrow>.ctl.wide{flex:1 1 auto;min-width:0;max-width:460px}
+  .setrow>.ctl>input,.setrow>.ctl>select{width:210px}
+  .setrow>.ctl.wide>input{width:100%}
+
+  /* ── 表单 ── */
+  .row{display:flex;gap:14px;flex-wrap:wrap}
   .grow{flex:1 1 260px;min-width:200px}
-  label{display:block;font-size:12px;color:var(--fg2);margin:0 0 5px}
-  input[type=text],input[type=number],textarea,select{
-    width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;
-    color:var(--fg);padding:9px 11px;font:inherit;font-size:13.5px;outline:none;transition:border-color .12s}
-  textarea{resize:vertical;min-height:92px;font-family:inherit}
-  input:focus,textarea:focus,select:focus{border-color:var(--info)}
+  label{display:block;font-size:12.5px;color:var(--fg2);margin:0 0 6px}
+  input[type=text],input[type=number],input[type=password],textarea,select{
+    width:100%;background:var(--sunk);border:1px solid var(--line);
+    border-radius:var(--radius-sm);color:var(--fg);padding:10px 12px;
+    font:inherit;font-size:14px;outline:none;transition:border-color .13s,background .13s}
+  textarea{resize:vertical;min-height:96px;font-family:inherit}
+  input:focus,textarea:focus,select:focus{border-color:var(--accent-line);background:#fff}
   input::placeholder,textarea::placeholder{color:var(--fg3)}
-  button{
-    background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;
-    padding:8px 14px;font:inherit;font-size:13px;cursor:pointer;transition:background .12s,border-color .12s}
-  button:hover:not(:disabled){background:#242b35;border-color:#3a4350}
-  button:disabled{opacity:.45;cursor:not-allowed}
-  button.primary{background:var(--info);border-color:var(--info);color:#06121f;font-weight:600}
-  button.primary:hover:not(:disabled){background:#66b6ff;border-color:#66b6ff}
-  button.ghost{background:transparent}
-  button.danger{color:var(--err);border-color:rgba(255,107,107,.35)}
-  button.danger:hover:not(:disabled){background:var(--errbg)}
-  button.mini{padding:4px 9px;font-size:12px;border-radius:6px}
 
-  /* ── 后端卡片 ── */
-  .backs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
-  .back{background:var(--panel2);border:1.5px solid var(--line);border-radius:var(--radius);
-        padding:14px;display:flex;flex-direction:column;gap:10px;position:relative;transition:border-color .12s}
-  .back.active{border-color:var(--info);box-shadow:0 0 0 1px rgba(74,168,255,.25)}
-  .back.dead{opacity:.72}
-  .back .top{display:flex;align-items:center;gap:9px}
-  .back .top input[type=radio]{accent-color:var(--info);width:16px;height:16px;cursor:pointer;flex:none}
-  .back .nm{font-weight:600;font-size:14.5px}
-  .back .en{color:var(--fg3);font-size:11.5px;font-family:ui-monospace,Consolas,monospace}
-  .badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:2px 9px;border-radius:999px;
-         border:1px solid transparent;white-space:nowrap}
-  .badge .bdot{width:6px;height:6px;border-radius:50%;background:currentColor}
+  button{background:var(--surface);border:1px solid var(--line);color:var(--fg);
+         border-radius:var(--radius-sm);padding:8px 15px;font:inherit;font-size:13.5px;
+         cursor:pointer;transition:background .13s,border-color .13s,color .13s}
+  button:hover{background:var(--sunk)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .mini{padding:6px 12px;font-size:13px;border-radius:var(--radius-sm)}
+  .primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .primary:hover{background:var(--accent-h);border-color:var(--accent-h)}
+  .ghost{background:transparent}
+  .danger{color:var(--err)}
+  .danger:hover{background:var(--errbg);border-color:var(--err)}
+
+  /* ── iOS 风格开关（替代复选框）── */
+  .sw{position:relative;display:inline-block;width:46px;height:26px;flex:0 0 auto;cursor:pointer}
+  .sw input{position:absolute;opacity:0;width:0;height:0}
+  .sw .track{position:absolute;inset:0;background:#d9d7d1;border-radius:var(--pill);
+             transition:background .18s}
+  .sw .track::after{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;
+                    background:#fff;border-radius:50%;transition:transform .18s;
+                    box-shadow:0 1px 2px rgba(0,0,0,.18)}
+  .sw input:checked+.track{background:var(--accent)}
+  .sw input:checked+.track::after{transform:translateX(20px)}
+  .sw input:focus-visible+.track{outline:2px solid var(--accent-line);outline-offset:2px}
+
+  /* ── 徽章 ── */
+  .badge{display:inline-flex;align-items:center;gap:5px;font-size:12px;
+         padding:3px 10px;border-radius:var(--pill);white-space:nowrap}
+  .badge .bdot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
   .badge.ok{color:var(--ok);background:var(--okbg)}
   .badge.err{color:var(--err);background:var(--errbg)}
   .badge.warn{color:var(--warn);background:var(--warnbg)}
   .badge.info{color:var(--info);background:var(--infobg)}
   .badge.gray{color:var(--gray);background:var(--graybg)}
-  .reason{font-size:12px;color:var(--fg2);background:#151a20;border-left:2px solid var(--line);
-          padding:7px 9px;border-radius:0 6px 6px 0;word-break:break-word}
-  .xacct{margin-top:6px;padding:5px 9px;background:rgba(29,155,240,.12);
-         border:1px solid rgba(29,155,240,.35);border-radius:6px;font-size:12.5px}
-  .xacct.warn{background:rgba(255,193,7,.12);border-color:rgba(255,193,7,.35)}
-  .reason.ok{color:var(--ok);border-left-color:var(--ok)}
-  .reason.err{color:var(--err);border-left-color:var(--err)}
-  .back .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto}
-  .tag-now{position:absolute;top:-9px;right:12px;font-size:10.5px;background:var(--info);color:#06121f;
-           padding:1px 8px;border-radius:999px;font-weight:700}
 
   /* ── 表格 ── */
-  .tblwrap{overflow-x:auto;margin-top:4px}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
-  th{color:var(--fg3);font-weight:500;font-size:11.5px;text-transform:uppercase;letter-spacing:.4px;
-     white-space:nowrap;position:sticky;top:0;background:var(--panel)}
-  tbody tr:hover{background:#1a1f26}
-  td.id{color:var(--fg3);font-variant-numeric:tabular-nums;font-family:ui-monospace,Consolas,monospace;font-size:12px}
-  td.txt{max-width:330px}
-  .txt .s{color:var(--fg);word-break:break-word}
-  .txt .m{color:var(--fg3);font-size:11.5px;margin-top:2px}
-  .empty{text-align:center;color:var(--fg3);padding:28px 10px;font-size:13px}
-  .actions{display:flex;gap:6px;white-space:nowrap}
-  .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
-  .filters select{width:auto;min-width:130px}
-  .chip{padding:4px 11px;border-radius:999px;border:1px solid var(--line);background:transparent;
-        color:var(--fg2);font-size:12px;cursor:pointer}
-  .chip.on{background:var(--infobg);border-color:var(--info);color:var(--info)}
+  .tblwrap{overflow-x:auto;margin-top:2px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:12px 12px;border-bottom:1px solid var(--line2);vertical-align:middle}
+  tr:last-child td{border-bottom:0}
+  th{color:var(--fg3);font-weight:500;font-size:11.5px;text-transform:uppercase;
+     letter-spacing:.5px;white-space:nowrap;padding-top:0}
+  tbody tr:hover{background:#fcfbf9}
+  td.id{color:var(--fg3);font-variant-numeric:tabular-nums;
+        font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px}
+  td.txt{max-width:340px}
+  .empty{text-align:center;color:var(--fg3);padding:34px 10px;font-size:13.5px}
+  .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  .filters select{width:auto;min-width:140px}
+
+  /* ── 后端卡 ── */
+  .backs{display:flex;gap:14px;flex-wrap:wrap}
+  .backs>.back{flex:1 1 340px;border:1px solid var(--line);border-radius:var(--radius);
+               padding:16px 18px;background:var(--surface);
+               display:flex;flex-direction:column;transition:border-color .13s}
+  .backs>.back.now{border-color:var(--accent-line);background:#fffdfc}
+  .top{display:flex;align-items:center;gap:9px}
+  .top .nm{font-weight:600;font-size:14.5px}
+  .top .en{color:var(--fg3);font-size:12px;font-family:ui-monospace,Consolas,monospace}
+  /* ── 后端卡：大字符徽标 + 状态 + 能力标签 ── */
+  .bkhead{display:flex;align-items:center;gap:13px;margin-bottom:12px}
+  .bkhead .glyph{width:46px;height:46px;flex:0 0 auto;border-radius:var(--radius-sm);
+                 background:var(--sunk2);color:var(--fg);display:flex;align-items:center;
+                 justify-content:center;font-size:20px;font-weight:700}
+  .backs>.back.now .bkhead .glyph{background:var(--accent-soft);color:var(--accent)}
+  .bkmeta{min-width:0;flex:1 1 auto}
+  .bktitle{font-size:15px;font-weight:650;display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+  .bktitle .en{color:var(--fg3);font-size:11.5px;font-weight:400;
+               font-family:ui-monospace,Consolas,monospace}
+  .bkstatus{font-size:12.5px;color:var(--fg2);display:flex;align-items:center;gap:6px;margin-top:1px}
+  .bkstatus .dt{width:6px;height:6px;border-radius:50%;background:var(--fg3);flex:0 0 auto}
+  .bkstatus.ok{color:var(--ok)}     .bkstatus.ok .dt{background:var(--ok)}
+  .bkstatus.warn{color:var(--warn)} .bkstatus.warn .dt{background:var(--warn)}
+  .bkstatus.err{color:var(--err)}   .bkstatus.err .dt{background:var(--err)}
+  .caps{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .cap{font-size:11.5px;padding:2px 9px;border-radius:var(--pill);
+       background:var(--sunk);color:var(--fg2);white-space:nowrap}
+  .cap.warn{background:var(--warnbg);color:var(--warn)}
+  .cap.no{background:transparent;color:var(--fg3);text-decoration:line-through}
+  .bkhint{font-size:12px;color:var(--fg3);margin-bottom:4px}
+  .bkuse{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--fg2);
+         cursor:pointer;white-space:nowrap;flex:0 0 auto}
+  .bkuse input{accent-color:var(--accent);width:16px;height:16px;cursor:pointer;margin:0}
+  .reason{font-size:13px;color:var(--fg2);margin:10px 0 12px;padding:9px 11px;
+          background:var(--sunk);border-radius:var(--radius-sm);word-break:break-word}
+  .reason.err{color:var(--err);background:var(--errbg)}
+  .xacct{font-size:13px;padding:9px 11px;border-radius:var(--radius-sm);
+         margin-bottom:11px;background:var(--infobg);color:var(--info);word-break:break-all}
+  .xacct.warn{background:var(--warnbg);color:var(--warn)}
+  .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto}
+  .hd2{font-size:14px;color:var(--fg);font-weight:650;margin:0 0 12px}
+  .pwbox{margin-top:30px;padding-top:24px;border-top:1px solid var(--line)}
+  .pwarn{font-size:13px;color:var(--warn);background:var(--warnbg);
+         border-radius:var(--radius-sm);padding:11px 13px;margin:14px 0}
+  .loginbox{display:none;margin-top:16px;border:1px solid var(--line);
+            border-radius:var(--radius);padding:14px 16px;background:var(--sunk)}
+  .loginbox.show{display:block}
+  .loginbox.on{display:block}
+  .hd{display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:600}
+  .log{max-height:180px;overflow-y:auto;margin-top:10px;padding:10px;background:#fff;
+       border:1px solid var(--line);border-radius:var(--radius-sm);
+       font-family:ui-monospace,SFMono-Regular,Consolas,monospace;
+       font-size:12px;color:var(--fg2);white-space:pre-wrap;word-break:break-all}
+  .spinner{width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--accent);
+           border-radius:50%;display:inline-block;animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .tgwrap{display:flex;flex-direction:column}
+  .tgstat{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-bottom:16px}
+  .tgwho{font-size:14px;font-weight:600}
 
   /* ── 投料 ── */
-  .counter{font-size:12px;color:var(--fg3);text-align:right;margin-top:5px}
+  .drop{border:1.5px dashed var(--line);border-radius:var(--radius);padding:18px;
+        text-align:center;cursor:pointer;background:var(--sunk);transition:.13s}
+  .drop:hover,.drop.over{border-color:var(--accent-line);background:var(--accent-soft)}
+  .dropin{color:var(--fg2);font-size:13.5px}
+  .dropin b{color:var(--fg)}
+  .limits{font-size:12px;color:var(--fg3)}
+  .picked{display:flex;gap:11px;align-items:center;justify-content:center;font-size:13px}
+  .pinfo{display:flex;flex-direction:column;align-items:flex-start;min-width:0}
+  .pname{font-weight:600;overflow:hidden;text-overflow:ellipsis;max-width:230px;white-space:nowrap}
+  .pmeta{color:var(--fg3);font-size:12px}
+  .counter{font-size:12.5px;color:var(--fg3);text-align:right;margin-top:6px}
   .counter b{font-variant-numeric:tabular-nums}
   .counter.over b{color:var(--err)}
   .counter.ok b{color:var(--ok)}
-  .prevbox{background:#151a20;border:1px dashed var(--line);border-radius:8px;padding:10px 12px;
-           font-size:13px;color:var(--fg2);white-space:pre-wrap;word-break:break-word;margin-top:10px;min-height:38px}
+  .prevbox{margin-top:9px;padding:11px 13px;background:var(--sunk);border-radius:var(--radius-sm);
+           font-size:13.5px;white-space:pre-wrap;word-break:break-word;color:var(--fg2);min-height:22px}
+  .tag-now{display:inline-block;background:var(--accent-soft);color:var(--accent);
+           border-radius:var(--pill);padding:1px 9px;font-size:12px;font-weight:600}
 
-  /* ── 提示条 ── */
-  #toasts{position:fixed;right:16px;bottom:16px;z-index:99;display:flex;flex-direction:column;gap:8px;max-width:340px}
-  .toast{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--info);
-         border-radius:8px;padding:10px 13px;font-size:13px;box-shadow:0 6px 22px rgba(0,0,0,.45);
-         animation:in .16s ease-out;word-break:break-word}
-  .toast.ok{border-left-color:var(--ok)}
-  .toast.err{border-left-color:var(--err)}
-  .toast.warn{border-left-color:var(--warn)}
-  @keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  /* ── 梗图 ── */
+  .meme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(122px,1fr));gap:12px}
+  .meme-tile{border:1.5px solid var(--line);border-radius:var(--radius-sm);overflow:hidden;
+             cursor:pointer;background:var(--sunk);transition:.13s;position:relative}
+  .meme-tile:hover{border-color:var(--accent-line)}
+  .meme-tile.on{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .meme-tile img{display:block;width:100%;height:92px;object-fit:cover;background:#fff}
+  .meme-tile .nm{padding:6px 8px;font-size:11.5px;color:var(--fg2);
+                 overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .meme-stage{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start}
+  .meme-canvas-wrap{flex:0 0 auto;border:1px solid var(--line);border-radius:var(--radius);
+                    padding:10px;background:var(--sunk)}
+  .meme-canvas-wrap canvas{display:block;max-width:100%;height:auto;border-radius:var(--radius-sm);background:#fff}
+  .meme-canvas-wrap canvas{width:min(380px,44vw)}
+  .meme-grid .limits{grid-column:1/-1}
+  .meme-side{flex:1 1 300px;min-width:260px}
 
-  .loginbox{margin-top:10px;background:#151a20;border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:none}
-  .loginbox.show{display:block}
-  .loginbox .hd{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--fg2);margin-bottom:6px}
-  .spinner{width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--info);border-radius:50%;
-           animation:spin .8s linear infinite;flex:none}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .log{max-height:150px;overflow-y:auto;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;
-       color:var(--fg2);line-height:1.7}
-  .log .t{color:var(--fg3);margin-right:6px}
+  /* ── toast ── */
+  #toasts{position:fixed;right:20px;bottom:20px;z-index:60;display:flex;
+          flex-direction:column;gap:9px;align-items:flex-end}
+  .toast{background:#1a1916;color:#fff;border-radius:var(--radius-sm);
+         padding:11px 15px;font-size:13.5px;box-shadow:0 8px 28px rgba(0,0,0,.2);
+         max-width:360px;word-break:break-word}
+  .toast.err{background:var(--err)}
+  .toast.ok{background:var(--ok)}
+  .foot{color:var(--fg3);font-size:12.5px;margin-top:26px;
+        padding-top:16px;border-top:1px solid var(--line)}
 
-  /* 账号密码登录 */
-  .pwbox{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)}
-  .pwbox .hd2{font-size:13px;color:var(--fg2);margin-bottom:10px;font-weight:600}
-  .pwarn{font-size:11.5px;color:var(--warn);background:rgba(210,153,34,.08);
-         border-left:3px solid var(--warn);border-radius:4px;padding:7px 10px;margin-top:10px;line-height:1.6}
+  /* ── 旧版遗留小部件（JS 动态生成）── */
+  .chip{padding:5px 13px;border-radius:var(--pill);border:1px solid var(--line);
+        background:var(--surface);font-size:13px;cursor:pointer;color:var(--fg2)}
+  .chip:hover{background:var(--sunk)}
+  .chip.on{background:var(--graybg);border-color:var(--line);color:var(--fg);font-weight:600}
+  .actions{display:flex;gap:7px;white-space:nowrap}
+  .s{font-size:13.5px;color:var(--fg)}
+  .m{font-size:12px;color:var(--fg3);margin-top:2px}
+  .t{color:var(--fg3);margin-right:6px}
+  .pmeta.bad{color:var(--err)}
+  .pmeta.good{color:var(--ok)}
+  details.docs{font-size:13px;color:var(--fg2);margin-top:12px}
+  details.docs summary{cursor:pointer;color:var(--fg3)}
 
-  /* Telegram 面板 */
-  .tgwrap{margin-top:4px}
-  .tgstat{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
-  .tgwho{font-size:12.5px;color:var(--fg2);font-family:ui-monospace,Consolas,monospace}
-
-  /* 媒体拖放区 */
-  .drop{border:1.5px dashed var(--line);border-radius:8px;padding:14px;text-align:center;
-        cursor:pointer;transition:border-color .15s,background .15s;background:#151a20}
-  .drop:hover,.drop.over{border-color:var(--info);background:rgba(88,166,255,.06)}
-  .dropin{font-size:12.5px;color:var(--fg3);line-height:1.7}
-  .dropin b{color:var(--info)}
-  .limits{font-size:11px;color:var(--fg3);margin-top:5px}
-  .picked{display:flex;align-items:center;gap:10px;text-align:left}
-  .picked img{width:56px;height:56px;object-fit:cover;border-radius:6px;border:1px solid var(--line);flex:none}
-  .picked .pinfo{flex:1;min-width:0}
-  .picked .pname{font-size:12.5px;color:var(--fg);word-break:break-all}
-  .picked .pmeta{font-size:11px;color:var(--fg3);margin-top:2px}
-  .picked .pmeta.bad{color:var(--err)}
-  .picked .pmeta.good{color:var(--ok)}
-  .foot{color:var(--fg3);font-size:11.5px;text-align:center;margin-top:24px}
-  code{background:#151a20;padding:1px 5px;border-radius:4px;font-family:ui-monospace,Consolas,monospace;font-size:12px}
-  @media (max-width:720px){
-    .stats{gap:12px;margin-left:0;width:100%}
-    td.txt{max-width:180px}
-    .wrap{padding:12px 10px 50px}
+  /* ── 窄屏 ── */
+  @media (max-width:860px){
+    .shell{flex-direction:column}
+    .side{width:auto;flex:0 0 auto;height:auto;position:static;
+          border-right:0;border-bottom:1px solid var(--line);padding:16px}
+    .brand{padding-bottom:12px}
+    .nav{flex-direction:row;flex-wrap:wrap}
+    .nav button{width:auto;border-radius:var(--pill)}
+    .nav .sep{display:none}
+    .sidefoot{margin-top:12px;border-top:0;padding-top:0}
+    .main{padding:20px 18px 70px}
+    .setrow{flex-direction:column;align-items:flex-start;gap:8px}
+    .setrow>.ctl,.setrow>.ctl.wide{width:100%;max-width:none}
   }
 </style>
 </head>
+<style>
+  /* ── 旧版遗留的小部件（JS 会动态生成）── */
+  .chip{padding:4px 11px;border-radius:999px;border:1px solid var(--line);
+        background:var(--surface);font-size:12.5px;cursor:pointer;color:var(--fg2)}
+  .chip:hover{background:var(--sunk)}
+  .chip.on{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent);font-weight:600}
+  .actions{display:flex;gap:6px;white-space:nowrap}
+  .s{font-size:13px;color:var(--fg)}
+  .m{font-size:11.5px;color:var(--fg3);margin-top:2px}
+  .t{color:var(--fg3);margin-right:6px}
+  .pmeta.bad{color:var(--err)}
+  .pmeta.good{color:var(--ok)}
+  .sidebtn{display:block;width:100%;margin-top:10px}
+  details.docs{font-size:12.5px;color:var(--fg2);margin-top:10px}
+  details.docs summary{cursor:pointer;color:var(--fg3)}
+  /* ── 控制台账号登录 ── */
+  .auth-gate{position:fixed;inset:0;z-index:100;background:var(--sunk);display:flex;
+             align-items:center;justify-content:center;padding:24px}
+  .auth-card{width:100%;max-width:380px;background:var(--surface);border:1px solid var(--line);
+             border-radius:18px;padding:30px 28px 26px;box-shadow:0 18px 50px rgba(26,25,22,.10)}
+  .auth-card h1{font-size:21px;margin:0 0 5px}
+  .auth-card p{color:var(--fg3);font-size:13px;margin:0 0 20px}
+  .auth-card label{display:block;font-size:13px;color:var(--fg2);margin:12px 0 5px}
+  .auth-card input{width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:10px;
+                   padding:10px 12px;font:inherit;background:var(--bg);color:var(--fg)}
+  .auth-card input:focus{outline:2px solid var(--accent-line);outline-offset:1px}
+  .auth-card button{width:100%;margin-top:18px}
+  .auth-error{color:var(--err);font-size:12.5px;min-height:19px;margin-top:10px}
+</style>
+
 <body>
-<header>
-  <div class="hrow">
+<div class="auth-gate" id="auth-gate">
+  <form class="auth-card" id="auth-form">
+    <h1>twitbot 控制台</h1>
+    <p>请先登录。两个账号的数据、队列和发布后端完全独立。</p>
+    <label for="auth-user">账号</label>
+    <input id="auth-user" name="username" autocomplete="username" autofocus
+           placeholder="qwqcon / luoaowoo" required>
+    <label for="auth-pass">密码</label>
+    <input id="auth-pass" name="password" type="password" autocomplete="current-password"
+           placeholder="请输入密码" required>
+    <div class="limits" style="margin-top:7px;font-size:12px">密码格式：账号名_账号名</div>
+    <button class="primary" type="submit" id="btn-auth-login">登录</button>
+    <div class="auth-error" id="auth-error"></div>
+  </form>
+</div>
+<div class="shell">
+
+  <!-- ── 左侧导航 ── -->
+  <aside class="side">
     <div class="brand">
       <span class="dot" id="dot"></span>
-      twitbot 控制台 <small id="ver"></small>
+      <span class="txt">twitbot 控制台</span>
+      <small id="ver"></small>
     </div>
+    <nav class="nav" id="nav">
+      <button data-tab="overview" class="on"><span class="ic">🏠</span>概览</button>
+      <button data-tab="publish"><span class="ic">📤</span>发送</button>
+      <button data-tab="queue"><span class="ic">📋</span>队列</button>
+      <button data-tab="collect"><span class="ic">📡</span>采集</button>
+      <button data-tab="analytics"><span class="ic">📊</span>数据日报</button>
+      <div class="sep"></div>
+      <button data-tab="backend"><span class="ic">🔌</span>发布后端</button>
+      <button data-tab="telegram"><span class="ic">🤖</span>Telegram</button>
+      <button data-tab="settings"><span class="ic">⚙️</span>设置</button>
+    </nav>
+    <div class="sidefoot">
+      <span id="foot-note">每 4 秒自动刷新</span>
+      <div id="whoami" style="margin-top:8px;color:var(--fg3);font-size:11.5px"></div>
+      <button class="mini ghost sidebtn" id="btn-logout" style="margin-top:8px">退出登录</button>
+      <button class="mini ghost sidebtn" id="btn-pause">—</button>
+    </div>
+  </aside>
+
+  <!-- ── 右侧内容 ── -->
+  <main class="main">
+
+    <!-- 顶部状态数字（所有选项卡共用）-->
     <div class="stats">
       <div class="stat"><b id="s-backend">—</b><span>当前后端</span></div>
       <div class="stat"><b id="s-depth">—</b><span>队列深度</span></div>
       <div class="stat"><b class="big" id="s-month">—</b><span>本月已发/上限</span></div>
       <div class="stat"><b id="s-total">—</b><span>任务总数</span></div>
       <div class="stat"><b id="s-pipe">—</b><span>发布循环</span></div>
-      <div class="stat" style="justify-content:center">
-        <button class="mini" id="btn-pause">—</button><span>暂停开关</span>
-      </div>
     </div>
-  </div>
-</header>
 
-<input type="file" id="state-file" accept=".json,application/json" hidden>
+    <!-- ══ 概览 ══ -->
+    <section class="section on" id="tab-overview">
+      <div class="pagehead"><h1>概览</h1>
+        <span class="desc">运行状态一览</span></div>
+      <div class="card">
+        <h2>运行状态</h2>
+        <div class="sub">这几项每 4 秒自动刷新；暂停开关在左下角。</div>
+        <div id="ov-status" class="row"></div>
+      </div>
+    </section>
 
-<div class="wrap">
+    <!-- ══ 发送 ══ -->
+    <section class="section" id="tab-publish">
+      <div class="pagehead"><h1>发送</h1>
+        <span class="desc">提交后进入队列，由发布循环取走</span></div>
 
-  <!-- 后端选择 -->
-  <div class="card">
-    <h2>发布后端 <span class="hint">切换前会校验目标后端是否真的可用</span></h2>
-    <div class="sub">「测试连接」会真实调用后端的 <code>verify()</code>（联网鉴权自检），比可用性判断更严格；返回的原始说明文案会原样显示。</div>
-    <div class="backs" id="backs">
-      <div class="empty">加载中…</div>
-    </div>
-    <div class="loginbox" id="loginbox">
-      <div class="hd"><span class="spinner" id="login-spin"></span><span id="login-msg">登录进行中…</span></div>
-      <div class="log" id="login-log"></div>
-      <div style="margin-top:8px"><button class="mini ghost" onclick="hideLogin()">收起</button></div>
-    </div>
-    <!-- 账号密码登录（浏览器后端）-->
-    <div class="pwbox">
-      <div class="hd2">用账号密码登录 X <span class="hint">仅「无头浏览器」后端可用；密码不会被保存</span></div>
-      <div class="row">
-        <div class="grow"><label for="pw-user">X 账号（用户名/邮箱/手机号）</label>
-          <input type="text" id="pw-user" autocomplete="username" placeholder="例如 myname 或 me@example.com"></div>
-        <div class="grow"><label for="pw-pass">密码</label>
-          <input type="password" id="pw-pass" autocomplete="current-password" placeholder="只在本次登录时使用，不落库"></div>
-      </div>
-      <div class="row" style="margin-top:10px" id="pw-code-row" hidden>
-        <div class="grow"><label for="pw-code">验证码 <span class="hint">X 要求二次验证时填这里</span></label>
-          <input type="text" id="pw-code" inputmode="numeric" autocomplete="one-time-code" placeholder="短信/邮箱收到的验证码"></div>
-      </div>
-      <div class="pwarn">⚠ 账号密码登录会自动操作浏览器，容易被 X 风控拦（页面弹「出了点问题」）。<b>推荐改用「登录 X」</b>——它启动的是你电脑上的真实 Chrome，不会被判定为自动化。</div>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <button class="primary" id="btn-pw-login">用账号密码登录</button>
-        <button class="mini ghost" id="btn-pw-code" hidden>提交验证码并继续</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Telegram 机器人 -->
-  <div class="card">
-    <h2>Telegram 机器人 <span class="hint">转发给机器人 → 自动进队列 → 发到 X</span></h2>
-    <div class="sub">在这里配置并启停机器人。token 用 <code>@BotFather</code> 申请；保存后立即生效，无需重启。</div>
-    <div class="tgwrap">
-      <div class="tgstat">
-        <span class="badge gray" id="tg-badge"><span class="bdot"></span>未知</span>
-        <span id="tg-who" class="tgwho">—</span>
-      </div>
-      <div class="row">
-        <div class="grow"><label for="tg-token">Bot Token <span class="hint" id="tg-token-hint"></span></label>
-          <input type="password" id="tg-token" autocomplete="off" placeholder="123456789:AAH...（留空表示沿用已保存/环境变量里的 token）"></div>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <div class="grow"><label for="tg-users">允许的 user id <span class="hint">逗号分隔；留空=不限制</span></label>
-          <input type="text" id="tg-users" placeholder="例如 12345678,87654321"></div>
-        <div class="grow"><label for="tg-chats">允许的 chat id <span class="hint">逗号分隔；留空=不限制</span></label>
-          <input type="text" id="tg-chats" placeholder="例如 -1001234567890"></div>
-      </div>
-      <div class="grow" style="margin-top:10px;display:flex;align-items:center;gap:6px">
-        <label style="display:inline-flex;align-items:center;gap:6px;margin:0;cursor:pointer">
-          <input type="checkbox" id="tg-auto" style="accent-color:var(--info)"> 启动 twitbot 时自动拉起机器人
-        </label>
-      </div>
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="mini" id="btn-tg-verify">校验 Token</button>
-        <button class="primary" id="btn-tg-start">启动机器人</button>
-        <button class="mini" id="btn-tg-stop">停止</button>
-        <button class="mini ghost" id="btn-tg-restart">重启</button>
-      </div>
-      <div class="counter" style="text-align:left;margin-top:8px" id="tg-info"></div>
-    </div>
-  </div>
-
-  <!-- 手工投料 -->
-  <div class="card">
-    <h2>手工投料 <span class="hint">提交后进入队列，由发布循环取走</span></h2>
-    <div class="sub">去重窗口内提交完全相同的正文+媒体会被拒绝（409）。</div>
-    <div class="row">
-      <div class="grow">
-        <label for="f-text">正文</label>
-        <textarea id="f-text" placeholder="要发布的内容…（中文按 2 计，链接按 23 计）"></textarea>
-        <div class="counter" id="counter"><b>0</b> / 280（含前后缀估算）</div>
-        <div class="prevbox" id="preview">预览会显示在这里</div>
-      </div>
-      <div class="grow" style="flex:1 1 260px">
-        <label>媒体（图片 / 视频，可选）</label>
-        <div class="drop" id="drop">
-          <input type="file" id="f-file" accept="image/*,video/*" hidden>
-          <div class="dropin" id="drop-in">
-            <b>点击选择</b> 或把图片/视频拖进来
-            <div class="limits" id="media-limits"></div>
+      <div class="card">
+        <h2>手工投料 <span class="hint">提交后进入队列，由发布循环取走</span></h2>
+        <div class="sub">去重窗口内提交完全相同的正文+媒体会被拒绝（409）。</div>
+        <div class="row">
+          <div class="grow" style="flex:1 1 420px">
+            <label for="f-text">正文</label>
+            <textarea id="f-text" placeholder="要发布的内容…（中文按 2 计，链接按 23 计）"></textarea>
+            <div class="counter" id="counter"><b>0</b> / 280（含前后缀估算）</div>
+            <div class="prevbox" id="preview">预览会显示在这里</div>
           </div>
-          <div id="drop-picked" hidden></div>
-        </div>
-        <label for="f-media" style="margin-top:12px">或填已有媒体文件名（可选）</label>
-        <input type="text" id="f-media" placeholder="例如 abc.jpg（相对 DATA_DIR/media）">
-        <label for="f-quote" style="margin-top:12px">引用推文 ID（可选）</label>
-        <input type="text" id="f-quote" placeholder="推文 ID 或直接粘贴推文链接">
-        <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="primary" id="btn-post">提交到队列</button>
-          <label style="display:inline-flex;align-items:center;gap:6px;margin:0;cursor:pointer">
-            <input type="checkbox" id="f-await" style="accent-color:var(--info)"> 先设为待确认
-          </label>
+          <div class="grow" style="flex:1 1 320px">
+            <label>媒体（图片 / 视频，可选）</label>
+            <div class="drop" id="drop">
+              <input type="file" id="f-file" accept="image/*,video/*" hidden>
+              <div class="dropin" id="drop-in">
+                <b>点击选择</b> 或把图片/视频拖进来
+                <div class="limits" id="media-limits"></div>
+              </div>
+              <div id="drop-picked" hidden></div>
+            </div>
+            <label for="f-media" style="margin-top:12px">或填已有媒体文件名（可选）</label>
+            <input type="text" id="f-media" placeholder="例如 abc.jpg（相对 DATA_DIR/media）">
+            <div style="margin-top:6px;display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+              <button class="mini" id="btn-lib-pick" type="button">🗂 从素材库选</button>
+              <span class="limits">素材库里的图可以直接拿来发</span>
+            </div>
+            <div id="lib-picker" hidden style="margin-top:10px;padding:12px;border:1px solid var(--line);
+                 border-radius:var(--radius);background:var(--sunk)"></div>
+            <label for="f-quote" style="margin-top:12px">引用推文 ID（可选）</label>
+            <input type="text" id="f-quote" placeholder="推文 ID 或直接粘贴推文链接">
+            <label for="f-reply" style="margin-top:12px">评论到这条推文（可选）</label>
+            <input type="text" id="f-reply" placeholder="推文 ID 或链接；填了就发成评论">
+            <div class="limits" style="margin-top:5px">填了这项就是「评论」，引用那栏会被忽略。</div>
+            <label for="f-retweet" style="margin-top:12px">转帖这条推文（可选）</label>
+            <input type="text" id="f-retweet" placeholder="推文 ID 或链接；转帖不能带正文/媒体">
+            <div class="limits" style="margin-top:5px">优先级：评论 &gt; 转帖 &gt; 引用，填了上面的就忽略下面的。</div>
+            <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="primary" id="btn-post">提交到队列</button>
+              <label class="sw" title="先设为待确认（不自动发，等你点发送）">
+                <input type="checkbox" id="f-await"><span class="track"></span></label>
+              <span class="limits">先设为待确认</span>
+            </div>
+          </div>
         </div>
       </div>
-    </div>
-  </div>
+    </section>
 
-  <!-- 任务列表 -->
-  <div class="card">
-    <h2>任务队列 <span class="hint" id="jobs-hint"></span></h2>
-    <div class="filters" id="filters"></div>
-    <div class="tblwrap">
-      <table>
-        <thead><tr>
-          <th style="width:52px">ID</th><th style="width:78px">状态</th><th>正文摘要</th>
-          <th style="width:88px">后端</th><th style="width:136px">时间</th>
-          <th style="width:150px">失败原因</th><th style="width:132px">操作</th>
-        </tr></thead>
-        <tbody id="jobs"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- 设置 -->
-  <div class="card">
-    <h2>运行期设置 <span class="hint">存储在数据库，发布循环每轮读取</span></h2>
-    <div class="row">
-      <div class="grow"><label for="s-prefix">推文前缀</label><input type="text" id="s-prefix" placeholder="留空则不加"></div>
-      <div class="grow"><label for="s-suffix">推文后缀</label><input type="text" id="s-suffix" placeholder="留空则不加"></div>
-    </div>
-    <div class="row" style="margin-top:12px">
-      <div class="grow"><label for="s-limit">月度上限（条）</label><input type="number" id="s-limit" min="0" step="1"></div>
-      <div class="grow"><label for="s-dedup">去重窗口（秒）</label><input type="number" id="s-dedup" min="0" step="1"></div>
-      <div class="grow"><label for="s-quote">引用模式</label>
-        <select id="s-quote"><option value="auto">auto（发现推文链接自动转引用）</option><option value="off">off（不转引用）</option></select>
+    <!-- ══ 队列 ══ -->
+    <section class="section" id="tab-queue">
+      <div class="pagehead"><h1>任务队列</h1>
+        <span class="desc" id="jobs-hint"></span></div>
+      <div class="card">
+        <div class="filters" id="filters"></div>
+        <div class="tblwrap">
+          <table>
+            <thead><tr>
+              <th style="width:52px">ID</th><th style="width:78px">状态</th><th>正文摘要</th>
+              <th style="width:88px">后端</th><th style="width:136px">时间</th>
+              <th style="width:150px">失败原因</th><th style="width:132px">操作</th>
+            </tr></thead>
+            <tbody id="jobs"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+          </table>
+        </div>
       </div>
-      <div class="grow" style="display:flex;align-items:flex-end"><button class="primary" id="btn-save">保存设置</button></div>
-    </div>
-  </div>
+    </section>
 
-  <div class="foot">数据目录 <code id="f-datadir">—</code> · 服务 <a href="/api/docs" target="_blank">/api/docs</a> · <span id="foot-note">每 4 秒自动刷新</span></div>
+    <!-- ══ 采集 ══ -->
+    <section class="section" id="tab-collect">
+      <div class="pagehead"><h1>采集</h1>
+        <span class="desc">从各平台抓「点赞多 / 讨论多」的图文 → 筛一遍 → 转发到 X</span></div>
+
+      <div class="card">
+        <h2>平台 <span class="hint">点「采集」抓最新热门；需要登录的点「扫码登录」</span></h2>
+        <div class="backs" id="col-platforms"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="card">
+        <h2>筛选 <span class="hint">只看够热的，免得发出去没人看</span></h2>
+        <div class="setrow" style="padding-top:0">
+          <div class="lab">最低点赞<small>0 = 不筛</small></div>
+          <div class="ctl"><input type="number" id="col-min-likes" value="10000" min="0" step="1000"></div>
+        </div>
+        <div class="setrow">
+          <div class="lab">最低评论</div>
+          <div class="ctl"><input type="number" id="col-min-comments" value="0" min="0" step="10"></div>
+        </div>
+        <div class="setrow">
+          <div class="lab">只看没发过的</div>
+          <div class="ctl"><label class="sw"><input type="checkbox" id="col-unused" checked><span class="track"></span></label></div>
+        </div>
+        <div style="margin-top:14px;display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+          <button class="primary" id="btn-col-refresh">应用筛选</button>
+          <span class="limits" id="col-stats"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>采集结果 <span class="hint" id="col-count"></span></h2>
+        <div id="col-items"><div class="empty">还没有采集结果 —— 点上面的「采集」</div></div>
+      </div>
+    </section>
+
+    <!-- ══ 数据日报 ══ -->
+
+    <section class="section" id="tab-analytics">
+      <div class="pagehead"><h1>数据日报</h1>
+        <span class="desc" id="an-hint">来自 X 自己的分析接口，含「认证用户 / 普通用户」拆分</span></div>
+      <div class="card">
+        <div class="sub" id="an-sub">
+          X 的<b>账号级</b>数据只按「完整的一天」发布，所以下面「账号数据」标的是<b>最新完整日</b>；
+          「今日实时」来自逐条推文，是当前值。
+        </div>
+        <div class="filters">
+          <button class="primary" id="btn-an-refresh">刷新数据</button>
+          <button class="mini an-range" data-days="7">近7天</button>
+          <button class="mini an-range" data-days="30">近30天</button>
+          <button class="mini an-range" data-days="92">近三月</button>
+          <span class="counter" id="an-progress" style="margin-left:auto;margin-top:0"></span>
+        </div>
+        <div id="an-summary"><div class="empty">加载中…</div></div>
+        <div id="an-detail"></div>
+      </div>
+    </section>
+
+    <!-- ══ 发布后端 ══ -->
+    <section class="section" id="tab-backend">
+      <div class="pagehead"><h1>发布后端</h1>
+        <span class="desc">切换前会校验目标后端是否真的可用</span></div>
+      <div class="card">
+        <div class="sub">「测试连接」会真实调用后端的 <code>verify()</code>（联网鉴权自检），比可用性判断更严格；返回的原始说明文案会原样显示。</div>
+        <div class="backs" id="backs"><div class="empty">加载中…</div></div>
+        <div class="loginbox" id="loginbox">
+          <div class="hd"><span class="spinner" id="login-spin"></span><span id="login-msg">登录进行中…</span></div>
+          <div class="log" id="login-log"></div>
+          <div style="margin-top:8px"><button class="mini ghost" onclick="hideLogin()">收起</button></div>
+        </div>
+        <div class="pwbox">
+          <div class="hd2">用账号密码登录 X <span class="hint">仅「无头浏览器」后端可用；密码不会被保存</span></div>
+          <div class="row">
+            <div class="grow"><label for="pw-user">X 账号（用户名/邮箱/手机号）</label>
+              <input type="text" id="pw-user" autocomplete="username" placeholder="例如 myname 或 me@example.com"></div>
+            <div class="grow"><label for="pw-pass">密码</label>
+              <input type="password" id="pw-pass" autocomplete="current-password" placeholder="只在本次登录时使用，不落库"></div>
+          </div>
+          <div class="row" style="margin-top:10px" id="pw-code-row" hidden>
+            <div class="grow"><label for="pw-code">验证码 <span class="hint">X 要求二次验证时填这里</span></label>
+              <input type="text" id="pw-code" inputmode="numeric" autocomplete="one-time-code" placeholder="短信/邮箱收到的验证码"></div>
+          </div>
+          <div class="pwarn">⚠ 账号密码登录会自动操作浏览器，容易被 X 风控拦（页面弹「出了点问题」）。<b>推荐改用「登录 X」</b>——它启动的是你电脑上的真实 Chrome，不会被判定为自动化。</div>
+          <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="primary" id="btn-pw-login">用账号密码登录</button>
+            <button class="mini ghost" id="btn-pw-code" hidden>提交验证码并继续</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ Telegram ══ -->
+    <section class="section" id="tab-telegram">
+      <div class="pagehead"><h1>Telegram 机器人</h1>
+        <span class="desc">转发给机器人 → 自动进队列 → 发到 X</span></div>
+      <div class="card">
+        <div class="sub">在这里配置并启停机器人。token 用 <code>@BotFather</code> 申请；保存后立即生效，无需重启。</div>
+        <div class="tgwrap">
+          <div class="tgstat">
+            <span class="badge gray" id="tg-badge"><span class="bdot"></span>未知</span>
+            <span id="tg-who" class="tgwho">—</span>
+          </div>
+          <div class="row">
+            <div class="grow"><label for="tg-token">Bot Token <span class="hint" id="tg-token-hint"></span></label>
+              <input type="password" id="tg-token" autocomplete="off" placeholder="123456789:AAH...（留空表示沿用已保存/环境变量里的 token）"></div>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <div class="grow">
+              <label>👤 管理员列表 <span class="hint">👑 = 所有者（审批人），默认是第一个，可改</span></label>
+              <div id="tg-admin-list"><div class="limits">加载中…</div></div>
+              <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+                <input type="text" id="tg-add-admin" placeholder="加人：@用户名 或 user id" style="flex:1 1 170px">
+                <button class="mini" id="btn-tg-add-admin">添加</button>
+              </div>
+              <div class="limits" id="tg-contacts" style="margin-top:6px"></div>
+            </div>
+            <div class="grow">
+              <label>⏳ 待审批申请 <span class="hint">别人发 /sign 就会出现在这里</span></label>
+              <div id="tg-pending"><div class="limits">暂无</div></div>
+              <label for="tg-chats" style="margin-top:12px">允许的 chat id <span class="hint">逗号分隔；留空=不限制</span></label>
+              <input type="text" id="tg-chats" placeholder="例如 -1001234567890">
+            </div>
+          </div>
+          <div class="setrow" style="border-bottom:0">
+            <div class="lab">随 twitbot 一起启动<small>开机/重启进程时自动拉起机器人</small></div>
+            <div class="ctl"><label class="sw"><input type="checkbox" id="tg-auto"><span class="track"></span></label></div>
+          </div>
+          <div class="tg-actions">
+            <button class="mini" id="btn-tg-verify">校验 Token</button>
+            <button class="mini primary" id="btn-tg-start">启动机器人</button>
+            <button class="mini ghost" id="btn-tg-stop">停止</button>
+            <button class="mini ghost" id="btn-tg-restart">重启</button>
+          </div>
+          <div class="counter" style="text-align:left;margin-top:8px" id="tg-info"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ 设置 ══ -->
+    <section class="section" id="tab-settings">
+      <div class="pagehead"><h1>运行期设置</h1>
+        <span class="desc">存储在数据库，发布循环每轮读取</span></div>
+      <div class="card">
+        <h2>推文内容</h2>
+        <div class="sub">发出去的每条推文都会自动带上前缀 / 后缀（留空则不加）。</div>
+        <div class="setrow">
+          <div class="lab">推文前缀<small>加在正文前面</small></div>
+          <div class="ctl wide"><input type="text" id="s-prefix" placeholder="留空则不加"></div>
+        </div>
+        <div class="setrow">
+          <div class="lab">推文后缀<small>加在正文后面</small></div>
+          <div class="ctl wide"><input type="text" id="s-suffix" placeholder="留空则不加"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>发布限制</h2>
+        <div class="sub">防刷屏 / 防重复发。</div>
+        <div class="setrow">
+          <div class="lab">月度上限<small>一个月最多发多少条</small></div>
+          <div class="ctl"><input type="number" id="s-limit" min="0" step="1"></div>
+        </div>
+        <div class="setrow">
+          <div class="lab">去重窗口<small>多少秒内内容完全相同就拒绝（秒）</small></div>
+          <div class="ctl"><input type="number" id="s-dedup" min="0" step="1"></div>
+        </div>
+        <div class="setrow">
+          <div class="lab">引用模式<small>正文里出现推文链接时怎么处理</small></div>
+          <div class="ctl"><select id="s-quote">
+            <option value="auto">auto（自动转引用）</option>
+            <option value="off">off（不转引用）</option></select></div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:22px">
+        <button class="primary" id="btn-save">保存设置</button>
+        <span class="limits">改完记得点保存</span>
+      </div>
+
+      <div class="foot">
+        数据目录 <code id="f-datadir">—</code> · 服务 <a href="/api/docs" target="_blank">/api/docs</a>
+      </div>
+    </section>
+
+  </main>
 </div>
 
+<div id="col-login" hidden style="position:fixed;inset:0;z-index:70;background:rgba(26,25,22,.45);
+     display:flex;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:14px;padding:22px 24px;max-width:340px;text-align:center;
+              box-shadow:0 18px 50px rgba(0,0,0,.28)">
+    <div style="font-weight:700;font-size:15px;margin-bottom:4px" id="col-login-title">扫码登录</div>
+    <div class="limits" style="margin-bottom:14px">用对应 App 扫下面的二维码</div>
+    <div id="col-login-qr"></div>
+    <div class="limits" style="margin-top:12px" id="col-login-msg"></div>
+    <div style="margin-top:14px;display:flex;gap:8px;justify-content:center">
+      <button class="mini" onclick="colLoginRestart()">重新生成二维码</button>
+      <button class="mini ghost" onclick="colLoginClose()">关闭</button>
+    </div>
+  </div>
+</div>
 <div id="toasts"></div>
+<input type="file" id="f-state" accept=".json,application/json" hidden>
 
 <script>
 "use strict";
 
 /* ── 通用工具 ─────────────────────────────────────────── */
 const $ = (id) => document.getElementById(id);
+
+/* ── 选项卡 ───────────────────────────────────────────── */
+const TAB_KEY = "twitbot.tab";
+
+function showTab(name){
+  if (!name || !$("tab-" + name)) name = "overview";
+  document.querySelectorAll("#nav button[data-tab]").forEach(b => {
+    b.classList.toggle("on", b.dataset.tab === name);
+  });
+  document.querySelectorAll(".section").forEach(s => {
+    s.classList.toggle("on", s.id === "tab-" + name);
+  });
+  try { localStorage.setItem(TAB_KEY, name); } catch(e){}
+  if (location.hash.slice(1) !== name) {
+    try { history.replaceState(null, "", "#" + name); } catch(e){}
+  }
+  // 切到日报时补一次数据（第一次打开页面时它可能还没渲染完）
+  if (name === "analytics" && !AN) loadAnalytics();
+  if (name === "collect"){ loadCollect(); loadCollectItems(); }
+}
+
+function bindTabs(){
+  document.querySelectorAll("#nav button[data-tab]").forEach(b => {
+    b.onclick = () => showTab(b.dataset.tab);
+  });
+  window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+}
 
 function esc(s){
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => (
@@ -365,6 +721,8 @@ function toast(msg, kind){
 
 /* WEB_TOKEN 支持：?token= 一次带上，之后所有请求都带 */
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
+let ACCOUNT = "";
+let consoleBooted = false;
 
 async function api(path, opts){
   const o = Object.assign({headers:{}}, opts || {});
@@ -390,6 +748,41 @@ async function api(path, opts){
     const err = new Error(msg); err.status = r.status; err.data = data; throw err;
   }
   return data || {};
+}
+
+function showAuthGate(msg){
+  $("auth-gate").style.display = "flex";
+  $("auth-error").textContent = msg || "";
+  setTimeout(() => { try { $("auth-user").focus(); } catch(e){} }, 30);
+}
+
+function hideAuthGate(){
+  $("auth-gate").style.display = "none";
+}
+
+async function doConsoleLogin(ev){
+  if (ev) ev.preventDefault();
+  const u = $("auth-user").value.trim();
+  const p = $("auth-pass").value;
+  $("auth-error").textContent = "";
+  try {
+    const r = await api("/api/auth/login", {method:"POST", body:{username:u, password:p}});
+    ACCOUNT = r.username || u;
+    $("auth-pass").value = "";
+    hideAuthGate();
+    bootConsole();
+  } catch(e) {
+    $("auth-error").textContent = e.message || "登录失败";
+  }
+}
+
+async function consoleLogout(){
+  try { await api("/api/auth/logout", {method:"POST"}); } catch(e){}
+  ACCOUNT = "";
+  if (sse) { try { sse.close(); } catch(e){} sse = null; }
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  showAuthGate("");
+  $("auth-pass").value = "";
 }
 
 /* X 字数折算：中文/emoji 计 2、URL 一律计 23、其它计 1（与 core.textutil.weighted_len 同口径） */
@@ -454,7 +847,8 @@ function renderStatus(st){
   const paused = !!st.paused;
   const bp = $("btn-pause");
   bp.textContent = paused ? "已暂停 · 点击恢复" : "运行中 · 点击暂停";
-  bp.className = "mini " + (paused ? "" : "primary");
+  // 侧边栏底部是常驻控件，做成「安静」的样子：运行=普通描边，暂停=红字提醒
+  bp.className = "mini " + (paused ? "danger" : "");
   const dot = $("dot");
   const curOk = curLabel ? curLabel.available : false;
   dot.className = "dot" + (curOk ? "" : " bad");
@@ -465,6 +859,49 @@ function renderStatus(st){
   renderPipeline(st.pipeline);
   renderTg(st.tg, st.settings && st.settings.tg);
   renderMediaLimits(st.media);
+  renderAnalyticsStatus(st.analytics);
+  renderOverview(st);
+}
+
+/* ── 概览页：把顶部状态重复成几张可读的小卡 ── */
+function ovCard(value, label, tone){
+  return '<div class="stat" style="min-width:120px">' +
+    '<b class="' + (tone || "") + '" style="font-size:19px">' + esc(String(value)) + '</b>' +
+    '<span>' + esc(label) + '</span></div>';
+}
+
+function renderOverview(st){
+  const box = $("ov-status");
+  if (!box || !st) return;
+  const q = st.queue || {}, s = st.settings || {}, tg = st.tg || {}, an = st.analytics || {};
+  const cur = st.backend || "—";
+  const be = (st.backends || []).find(b => b.name === cur) || {};
+  const pipe = st.pipeline || {};
+  const pause = !!st.paused;
+  const items = [
+    ovCard(be.label || cur, "发布后端", be.available ? "big" : ""),
+    ovCard((q.depth != null ? q.depth : 0), "队列深度"),
+    ovCard((q.month_sent || 0) + " / " + (q.limit || 0), "本月已发 / 上限", "big"),
+    ovCard(q.total || 0, "任务总数"),
+    ovCard(pipe.ready === false ? "未就绪" : (pipe.publishing_job_id ? ("发送中 #" + pipe.publishing_job_id) : "就绪"),
+           "发布循环"),
+    ovCard(pause ? "已暂停" : "运行中", "暂停状态", pause ? "" : "big"),
+    ovCard(tg.running ? ("@" + (tg.bot_username || "运行中")) : "未运行", "Telegram 机器人"),
+    ovCard((an.tweets || 0) + " 条 / " + (an.days || 0) + " 天", "已采日报数据"),
+  ];
+  box.innerHTML = items.join("");
+}
+
+// 采集完成后（SSE 推来新的 last_collected_at）自动重读日报
+function renderAnalyticsStatus(a){
+  if (!a) return;
+  const el = $("an-hint");
+  const when = a.last_collected_at ? fmtTime(a.last_collected_at) : "从未";
+  if (el) el.textContent = "上次采集：" + when + (a.account ? "（@" + a.account + "）" : "");
+  if (a.last_collected_at && a.last_collected_at !== anStamp){
+    if (anStamp) loadAnalytics();
+    anStamp = a.last_collected_at;
+  }
 }
 
 function renderPipeline(p){
@@ -487,33 +924,41 @@ function renderBackends(list, cur){
   if (!list.length){ box.innerHTML = '<div class="empty">未发现任何后端</div>'; return; }
   box.innerHTML = list.map(b => {
     const isCur = b.name === cur;
-    let cls = "gray", txt = "不可用";
-    if (b.available){ cls = "ok"; txt = "可用"; }
-    else if (!b.loaded){ cls = "err"; txt = "模块未就绪"; }
-    else { cls = "err"; txt = "不可用"; }
     const reason = b.reason || (b.available ? "就绪" : "未提供原因");
-    const rcls = b.available ? "ok" : "err";
     const canLogin = b.name === "browser";
+    // 状态行：绿点=能用 / 黄点=能用但有前提 / 红点=不能用
+    let st = "err", stText = "不可用";
+    if (b.name === "browser") {
+      if (b.available && X_ACCOUNT) { st = "ok";   stText = "已登录 · " + X_ACCOUNT; }
+      else if (b.available)         { st = "warn"; stText = "已保存登录态 · 账号未识别"; }
+      else                          { st = "err";  stText = b.loaded ? "未登录" : "模块未就绪"; }
+    } else if (!b.loaded)           { st = "err";  stText = "模块未就绪"; }
+    else if (b.available)           { st = "ok";   stText = "凭据已配置"; }
+    else                            { st = "err";  stText = "未配置 API 凭据"; }
+    const caps = (b.caps || []).map(c => {
+      const tip = c.s === "warn" ? "支持，但有前提" : (c.s === "no" ? "不支持" : "支持");
+      return `<span class="cap ${esc(c.s || "")}" title="${esc(tip)}">${esc(c.t)}</span>`;
+    }).join("");
     return `
-      <div class="back ${isCur ? "active" : ""} ${b.available ? "" : "dead"}">
-        ${isCur ? '<span class="tag-now">当前使用</span>' : ""}
-        <div class="top">
-          <input type="radio" name="backend" value="${esc(b.name)}" ${isCur ? "checked" : ""}
-                 onchange="switchBackend('${esc(b.name)}')" title="切换到这个后端">
-          <span class="nm">${esc(b.label || b.name)}</span>
-          <span class="en">${esc(b.name)}</span>
-          <span class="badge ${cls}" style="margin-left:auto"><span class="bdot"></span>${txt}</span>
+      <div class="back ${isCur ? "now" : ""}">
+        <div class="bkhead">
+          <span class="glyph">${esc(b.glyph || "?")}</span>
+          <div class="bkmeta">
+            <div class="bktitle">${esc(b.label || b.name)}<span class="en">${esc(b.name)}</span></div>
+            <div class="bkstatus ${st}"><span class="dt"></span>${esc(stText)}</div>
+          </div>
+          <label class="bkuse" title="把发布切到这个后端">
+            <input type="radio" name="backend" value="${esc(b.name)}" ${isCur ? "checked" : ""}
+                   onchange="switchBackend('${esc(b.name)}')">使用
+          </label>
         </div>
-        <div class="reason ${rcls}">${esc(b.loaded ? reason : ("模块未就绪 —— " + reason))}</div>
-        ${b.name === "browser" && b.available && X_ACCOUNT
-          ? `<div class="xacct">当前账号：<b>${esc(X_ACCOUNT)}</b></div>`
-          : (b.name === "browser" && b.available
-             ? `<div class="xacct warn">当前账号：未知 —— 点「测试连接」可自动识别</div>`
-             : "")}
+        ${caps ? `<div class="caps">${caps}</div>` : ""}
+        ${b.hint ? `<div class="bkhint">${esc(b.hint)}</div>` : ""}
+        <div class="reason ${b.available ? "ok" : "err"}">${esc(b.loaded ? reason : ("模块未就绪 —— " + reason))}</div>
         <div class="acts">
           <button class="mini" onclick="verifyBackend('${esc(b.name)}', this)">测试连接</button>
           ${canLogin ? `<button class="mini" onclick="loginBrowser(this)">登录 X</button>` : ""}
-          ${canLogin ? `<button class="mini ghost" onclick="pickStateFile()">上传登录态</button>` : ""}
+          ${b.name === "browser" ? `<button class="mini" onclick="uploadStateFile()" title="在别的机器上导出 storage_state.json 再传到这里（本机没装 Chrome 时用）">📁 上传登录态 JSON</button>` : ""}
           ${isCur ? "" : `<button class="mini ghost" onclick="switchBackend('${esc(b.name)}')">切换到此后端</button>`}
         </div>
       </div>`;
@@ -565,8 +1010,7 @@ function renderTg(tg, st){
 
   // 只在用户没在输入时回填，避免覆盖正在编辑的内容
   if (st && !tgBusy){
-    if (document.activeElement !== $("tg-users")) $("tg-users").value = st.allowed_users || "";
-    if (document.activeElement !== $("tg-chats")) $("tg-chats").value = st.allowed_chats || "";
+  if (document.activeElement !== $("tg-chats")) $("tg-chats").value = st.allowed_chats || "";
     $("tg-auto").checked = !!st.autostart;
     $("tg-token-hint").textContent = tg.token_set
       ? ("已保存 " + (tg.token_masked || "") + "，留空即沿用")
@@ -590,13 +1034,13 @@ async function tgAction(kind, extra){
   try {
     const body = Object.assign({
       token: $("tg-token").value.trim(),
-      allowed_users: $("tg-users").value.trim(),
       allowed_chats: $("tg-chats").value.trim()
     }, extra || {});
     const r = await api("/api/tg/" + kind, {method:"POST", body});
     toast(r.message || "完成", "ok");
     if (kind === "start" || kind === "restart") $("tg-token").value = "";
     await refreshStatus();
+    if (kind === "start" || kind === "stop" || kind === "restart") await loadAdmins();
   } catch(e){
     toast("Telegram " + kind + "失败：" + e.message, "err");
   } finally {
@@ -609,13 +1053,146 @@ async function tgAction(kind, extra){
 async function saveTgSettings(){
   // 仅保存白名单与自启开关（token 通过启动动作落库）
   try {
-    await api("/api/settings", {method:"POST", body:{
-      tg_allowed_users: $("tg-users").value.trim(),
+    const r = await api("/api/settings", {method:"POST", body:{
       tg_allowed_chats: $("tg-chats").value.trim(),
       tg_autostart: $("tg-auto").checked ? "1" : "0"
     }});
-    toast("Telegram 白名单已保存", "ok");
+    toast("Telegram 设置已保存", "ok");
   } catch(e){ toast("保存失败：" + e.message, "err"); }
+}
+
+/* ── 上传 X 登录态（storage_state.json）─────────────────── */
+function addAdminId(id){
+  $("tg-add-admin").value = String(id);
+  addAdmin();
+}
+
+/* ── 管理员列表 + 待审批（core.tg_admins）─────────────── */
+async function loadAdmins(){
+  try {
+    renderAdmins(await api("/api/tg/admins"));
+  } catch(e){
+    $("tg-admin-list").innerHTML =
+      '<div class="limits">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderAdmins(d){
+  const box = $("tg-admin-list");
+  const rows = d.admins || [];
+  if (!rows.length){
+    box.innerHTML = '<div class="limits">列表为空 —— 此时**不限制任何人**（谁都能发料）</div>';
+  } else {
+    box.innerHTML = '<table style="font-size:12.5px"><tbody>' + rows.map(a =>
+      '<tr><td style="width:26px">' + (a.is_owner ? "👑" : "·") + '</td>' +
+      '<td>' + esc(a.name || "（无名）") +
+        (a.username ? ' <span style="color:var(--fg3)">@' + esc(a.username) + '</span>' : "") +
+      '</td>' +
+      '<td class="id">' + esc(String(a.user_id)) + '</td>' +
+      '<td style="text-align:right;white-space:nowrap">' +
+        (a.is_owner ? "" :
+          '<button class="mini ghost" onclick="setOwner(' + a.user_id + ')">设为所有者</button> ') +
+        '<button class="mini ghost" onclick="removeAdmin(' + a.user_id + ')">移除</button>' +
+      '</td></tr>').join("") + '</tbody></table>';
+  }
+  const pend = d.pending || [];
+  const pbox = $("tg-pending");
+  if (!pend.length){ pbox.innerHTML = '<div class="limits">暂无待审批</div>'; return; }
+  pbox.innerHTML = pend.map(p =>
+    '<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;font-size:12.5px;flex-wrap:wrap">' +
+      '<span>' + esc(p.name || "（无名）") +
+        (p.username ? ' @' + esc(p.username) : "") + '</span>' +
+      '<span class="id">' + esc(String(p.user_id)) + '</span>' +
+      '<button class="mini" onclick="decideSignup(' + p.id + ',true)">✅ 批准</button>' +
+      '<button class="mini ghost" onclick="decideSignup(' + p.id + ',false)">❌ 拒绝</button>' +
+    '</div>').join("");
+}
+
+async function addAdmin(){
+  const q = ($("tg-add-admin").value || "").trim();
+  if (!q){ toast("请填 @用户名 或 user id", "err"); return; }
+  try {
+    const r = await api("/api/tg/admins/add", {method:"POST", body:{query:q}});
+    toast(r.message || "已添加", "ok");
+    $("tg-add-admin").value = "";
+    await loadAdmins();
+  } catch(e){ toast("添加失败：" + e.message, "err"); }
+}
+
+async function removeAdmin(id){
+  if (!confirm("确定把这个人从管理员里移除？")) return;
+  try {
+    await api("/api/tg/admins/remove", {method:"POST", body:{user_id:id}});
+    toast("已移除", "ok");
+    await loadAdmins();
+  } catch(e){ toast("移除失败：" + e.message, "err"); }
+}
+
+async function setOwner(id){
+  try {
+    await api("/api/tg/admins/owner", {method:"POST", body:{user_id:id}});
+    toast("已设为所有者（以后申请都推给 TA）", "ok");
+    await loadAdmins();
+  } catch(e){ toast("设置失败：" + e.message, "err"); }
+}
+
+async function decideSignup(id, approve){
+  try {
+    const r = await api("/api/tg/admins/decide",
+                        {method:"POST", body:{signup_id:id, approve:!!approve}});
+    toast(r.message || "已处理", "ok");
+    await loadAdmins();
+  } catch(e){ toast("审批失败：" + e.message, "err"); }
+}
+
+async function loadTgContacts(){
+  const box = $("tg-contacts");
+  if (!box) return;
+  try {
+    const r = await api("/api/tg/contacts?limit=8");
+    const list = r.contacts || [];
+    if (!list.length){
+      box.textContent = "（还没有人跟机器人说过话 —— 让 TA 发一句 /start，名字就会出现在这里）";
+      return;
+    }
+    box.innerHTML = "点一下加为管理员：" + list.map(c => {
+      const label = c.name || (c.username ? "@" + c.username : String(c.id));
+      const sub = c.username ? " @" + c.username : "";
+      return '<span class="badge gray" style="cursor:pointer;margin-left:6px" ' +
+             'onclick="addAdminId(\'' + esc(String(c.id)) + '\')" ' +
+             'title="user id ' + esc(String(c.id)) + '">' +
+             esc(label) + esc(sub) + '</span>';
+    }).join("");
+  } catch(e){ box.textContent = ""; }
+}
+
+function uploadStateFile(){
+  const f = $("f-state");
+  f.value = "";
+  f.click();
+}
+
+async function doUploadState(file){
+  if (!file) return;
+  const mb = file.size / 1024 / 1024;
+  if (mb > 4){ toast("文件太大（登录态通常几十 KB）", "err"); return; }
+  toast("正在上传登录态…");
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    // 注意：FormData 不能用 api()，它会给 body 加 JSON 头
+    const headers = {};
+    if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+    const resp = await fetch("/api/browser/state/upload", {method:"POST", headers, body: fd});
+    const r = await resp.json().catch(() => ({}));
+    if (!resp.ok || r.ok === false){
+      throw new Error(r.detail || r.error || r.message || ("上传失败 HTTP " + resp.status));
+    }
+    toast(r.message + (r.account ? "，账号：" + r.account : ""), "ok");
+    await refreshStatus();
+  } catch(e){
+    toast("上传失败：" + e.message, "err");
+  }
 }
 
 /* ── 媒体上传 ─────────────────────────────────────────── */
@@ -731,9 +1308,22 @@ function renderJobs(data){
     const meta = STATUS_META[j.status] || {cls:"gray", txt:j.status};
     const canRe = (j.status === "failed" || j.status === "canceled");
     const canCx = (j.status === "pending" || j.status === "awaiting");
+    // 「发送」= 立即真发这一条。pending/awaiting/failed 都可以点 —— 尤其
+    // queue_send_enabled=0（只手动发）时，pending 任务不会自己发，必须能手动推。
+    const canGo = (j.status === "pending" || j.status === "awaiting" || j.status === "failed");
     const body = j.summary || "(空)";
     const media = j.media_path ? `📎 ${esc(j.media_path)}` : "";
-    const quote = j.quote_id ? `引用 ${esc(j.quote_id)}` : "";
+    // quote_id 一列承载三种含义：r:<id> 评论 / t:<id> 转帖 / 纯数字 引用
+    const qid = String(j.quote_id || "");
+    const isReply = qid.indexOf("r:") === 0;
+    const isRetweet = qid.indexOf("t:") === 0;
+    const target = (isReply || isRetweet) ? qid.slice(2) : "";
+    const targetLink = target
+      ? `<a href="https://x.com/i/status/${esc(target)}" target="_blank" rel="noopener">${esc(target)}</a>`
+      : "";
+    const quote = isReply ? `💬 评论 → ${targetLink}`
+      : (isRetweet ? `🔄 转帖 → ${targetLink}`
+        : (qid ? `✏️ 引用 ${esc(qid)}` : ""));
     const meta2 = [media, quote, (j.attempts ? ("尝试 " + j.attempts + " 次") : "")].filter(Boolean).join(" · ");
     return `<tr>
       <td class="id">#${j.id}</td>
@@ -746,6 +1336,7 @@ function renderJobs(data){
       <td>${fmtTime(j.updated_at || j.created_at)}</td>
       <td style="color:var(--err);font-size:12px">${j.error ? esc(j.error) : ""}</td>
       <td><div class="actions">
+        <button class="mini primary" ${canGo ? "" : "disabled"} onclick="publishJob(${j.id})" title="立即发送这条">发送</button>
         <button class="mini" ${canRe ? "" : "disabled"} onclick="requeue(${j.id})" title="重置为待发">重发</button>
         <button class="mini danger" ${canCx ? "" : "disabled"} onclick="cancelJob(${j.id})" title="标记为已取消">取消</button>
         ${j.tweet_url ? `<a class="mini" href="${esc(j.tweet_url)}" target="_blank" rel="noopener">查看</a>` : ""}
@@ -817,6 +1408,23 @@ async function requeue(id){
   } catch(e){ toast(`#${id} 重发失败：` + e.message, "err"); }
 }
 
+/* 立即发送这一条（服务端真正调用 publish_one，会等出结果再回话）。
+   与「重发」的区别：重发只是把 failed/canceled 重置成待发、等循环取走；
+   这里绕过节流直接发，pending 也能推 —— queue_send_enabled=0 时必需。 */
+async function publishJob(id){
+  toast(`#${id} 正在发送…`);
+  try {
+    const r = await api(`/api/jobs/${id}/publish`, {method:"POST"});
+    const res = r.result || {};
+    if (r.published && res.ok !== false){
+      toast(`#${id} 已发布` + (res.tweet_url ? "：" + res.tweet_url : ""), "ok");
+    } else {
+      toast(`#${id} 发布失败：` + (res.error || "未知原因"), "err");
+    }
+    await refreshAll();
+  } catch(e){ toast(`#${id} 发送失败：` + e.message, "err"); }
+}
+
 async function cancelJob(id){
   try {
     const r = await api(`/api/jobs/${id}/cancel`, {method:"POST"});
@@ -836,50 +1444,6 @@ async function togglePause(){
 
 /* ── 浏览器登录 ───────────────────────────────────────── */
 let loginTimer = null;
-
-/* ── 上传登录态（服务器上无法登录，用这个把别处登录好的文件传上来）── */
-function pickStateFile(){
-  const el = $("state-file");
-  if (!el) return;
-  el.value = "";          // 允许重复选同一个文件
-  el.click();
-}
-
-async function uploadStateFile(file){
-  if (!file) return;
-  if (file.size > 4 * 1024 * 1024){
-    toast("文件太大（登录态一般只有几十 KB）", "err");
-    return;
-  }
-  const fd = new FormData();
-  fd.append("file", file);
-  // FormData 不能走 api()：那会给 body 加 JSON 头
-  const headers = {};
-  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
-
-  toast("正在上传登录态…");
-  try {
-    const resp = await fetch("/api/browser/state/upload", {method:"POST", headers, body: fd});
-    const r = await resp.json().catch(() => ({}));
-    if (!resp.ok || r.ok === false){
-      throw new Error(r.error || r.detail || r.message || ("上传失败 HTTP " + resp.status));
-    }
-    toast(r.message || "登录态已上传", "ok");
-    // 上传成功 -> 自动做一次连通性检查，顺便识别出账号是谁
-    try {
-      const st = await api("/api/backends/browser/verify", {method:"POST", body:{}});
-      if (st && st.available !== false){
-        toast("登录态有效" + (st.message ? "：" + st.message : ""), "ok");
-      }
-    } catch(e){
-      // 校验失败不影响上传本身，提示用户手点「测试连接」
-      toast("已上传，但连通性检查未通过：" + e.message, "err");
-    }
-    await refresh();
-  } catch(e){
-    toast("上传失败：" + e.message, "err");
-  }
-}
 
 async function loginBrowser(btn){
   // 走「真实 Chrome」这条路（/login-chrome）：
@@ -970,15 +1534,25 @@ async function submitJob(){
     text: $("f-text").value.trim(),
     media_path: $("f-media").value.trim(),
     quote_id: $("f-quote").value.trim(),
+    reply_to: $("f-reply").value.trim(),
+    retweet_to: $("f-retweet").value.trim(),
     status: $("f-await").checked ? "awaiting" : "pending"
   };
-  if (!body.text && !body.media_path){ toast("正文与媒体至少填一项", "warn"); return; }
+  const isRetweet = !!body.retweet_to && !body.reply_to;
+  if (!isRetweet && !body.text && !body.media_path){
+    toast("正文与媒体至少填一项（转帖除外）", "warn"); return;
+  }
+  if (isRetweet && (body.text || body.media_path)){
+    toast("转帖不能带正文或媒体，要配文字请改用「引用」", "warn"); return;
+  }
+  if (body.reply_to && !body.text){ toast("评论必须有文字内容", "warn"); return; }
   const btn = $("btn-post");
   btn.disabled = true; btn.textContent = "提交中…";
   try {
     const r = await api("/api/jobs", {method:"POST", body});
     toast(`已入队 #${r.id}（${r.kind}，约 ${r.weighted_len}/280 字）`, "ok");
     $("f-text").value = ""; $("f-media").value = ""; $("f-quote").value = "";
+    $("f-reply").value = ""; $("f-retweet").value = "";
     $("f-await").checked = false;
     updateCounter();
     await refreshAll();
@@ -1013,11 +1587,490 @@ async function saveSettings(){
 
 function setFilter(v){ jobsFilter = v; renderFilters(); refreshJobs(); }
 
+/* ══ 采集：平台热门图文 → 筛选 → 转发 X ══ */
+
+let COL = {platforms: [], items: [], stats: {}, progress: {}, timer: null};
+
+const COL_PLATFORM_GLYPH = {xiaohongshu:"小", bilibili:"哔", weibo:"微", tieba:"贴"};
+
+function colNum(n){
+  n = Number(n) || 0;
+  if (n >= 100000000) return (n / 100000000).toFixed(1) + "亿";
+  if (n >= 10000) return (n / 10000).toFixed(1) + "万";
+  return String(n);
+}
+
+async function loadCollect(){
+  try {
+    const r = await api("/api/collect/platforms");
+    COL.platforms = r.platforms || [];
+    COL.stats = r.stats || {};
+    renderCollectPlatforms();
+    const st = COL.stats;
+    $("col-stats").textContent = st.total
+      ? `库里 ${st.total} 条，其中 ${st.unused} 条还没发过` : "";
+  } catch(e){
+    $("col-platforms").innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderCollectPlatforms(){
+  const box = $("col-platforms");
+  if (!box) return;
+  box.innerHTML = COL.platforms.map(p => {
+    let st = "gray", txt = "未实现";
+    if (!p.implemented) { st = "gray"; txt = "还没做"; }
+    else if (p.wip) { st = "warn"; txt = "调试中"; }
+    else if (p.need_login && !p.logged_in) { st = "warn"; txt = "需要登录"; }
+    else if (p.last_error) { st = "err"; txt = "上次失败"; }
+    else if (p.last_run) { st = "ok"; txt = "可采集 · 上次 " + p.last_run; }
+    else { st = "ok"; txt = p.need_login ? "已登录" : "可直接采集"; }
+    const running = COL.progress.running && COL.progress.platform === p.name;
+    const n = (COL.stats.by_platform || {})[p.name] || 0;
+    return `
+      <div class="back ${p.implemented ? "" : "dead"}">
+        <div class="bkhead">
+          <span class="glyph">${esc(COL_PLATFORM_GLYPH[p.name] || p.glyph || "?")}</span>
+          <div class="bkmeta">
+            <div class="bktitle">${esc(p.label)}<span class="en">${esc(p.name)}</span></div>
+            <div class="bkstatus ${st}"><span class="dt"></span>${esc(txt)}</div>
+          </div>
+        </div>
+        <div class="caps">
+          <span class="cap">已采 ${n} 条</span>
+          ${p.need_login ? `<span class="cap ${p.logged_in ? "" : "warn"}">${p.logged_in ? "已登录" : "需扫码登录"}</span>` : `<span class="cap">免登录</span>`}
+        </div>
+        <div class="bkhint">${esc(p.hint || "")}</div>
+        ${p.impl ? "" : ""}
+        <div class="acts">
+          <button class="mini${running ? "" : " primary"}" onclick="colRun('${esc(p.name)}')"
+                  ${(!p.implemented || p.wip || running) ? "disabled" : ""}>${running ? "采集中…" : (p.wip ? "调试中" : "采集")}</button>
+          ${p.need_login ? `<button class="mini" onclick="colLogin('${esc(p.name)}')"
+                  ${(p.implemented && !p.wip) ? "" : "disabled"}>扫码登录</button>` : ""}
+          ${p.need_login && p.logged_in ? `<button class="mini ghost" onclick="colLogout('${esc(p.name)}')">退出登录</button>` : ""}
+        </div>
+      </div>`;
+  }).join("");
+}
+
+async function colRun(name){
+  try {
+    await api("/api/collect/run", {method:"POST", body:{platform:name, pages:2}});
+    toast("已开始采集（约 30~60 秒）", "ok");
+    $("col-items").innerHTML = '<div class="empty">采集中…</div>';
+    clearInterval(COL.timer);
+    COL.timer = setInterval(async () => {
+      try {
+        const r = await api("/api/collect/status");
+        COL.progress = r.progress || {};
+        renderCollectPlatforms();
+        if (!COL.progress.running){
+          clearInterval(COL.timer); COL.timer = null;
+          toast(COL.progress.message || "采集结束", COL.progress.ok ? "ok" : "err");
+          await loadCollect(); await loadCollectItems();
+        }
+      } catch(e){}
+    }, 2500);
+  } catch(e){ toast("启动采集失败：" + e.message, "err"); }
+}
+
+async function loadCollectItems(){
+  try {
+    const q = new URLSearchParams({
+      min_likes: $("col-min-likes").value || 0,
+      min_comments: $("col-min-comments").value || 0,
+      unused_only: $("col-unused").checked ? "true" : "false",
+      limit: 60,
+    });
+    const r = await api("/api/collect/items?" + q.toString());
+    COL.items = r.items || [];
+    renderCollectItems();
+  } catch(e){
+    $("col-items").innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function renderCollectItems(){
+  const box = $("col-items");
+  const rows = COL.items;
+  $("col-count").textContent = rows.length ? `（${rows.length} 条，按热度排序）` : "";
+  if (!rows.length){
+    box.innerHTML = '<div class="empty">没有符合条件的 —— 放宽筛选，或先点「采集」</div>';
+    return;
+  }
+  box.innerHTML = rows.map(it => {
+    const img = it.images && it.images[0] ? it.images[0] : it.cover;
+    return `<div style="display:flex;gap:14px;align-items:flex-start;padding:12px 0;
+                border-bottom:1px solid var(--line2)">
+      <img src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+           style="width:96px;height:96px;object-fit:cover;border-radius:8px;flex:0 0 auto;background:var(--sunk)">
+      <div style="flex:1 1 auto;min-width:0">
+        <div style="font-weight:600;font-size:13.5px">${esc((it.title||'').slice(0,52))}</div>
+        <div class="limits" style="margin-top:3px">
+          ${esc(it.author || '')} · ♥${colNum(it.likes)} · 💬${colNum(it.comments)}
+          ${it.used_job ? ' · <span style="color:var(--ok)">已发 #' + it.used_job + '</span>' : ''}
+        </div>
+        <div style="margin-top:7px;display:flex;gap:7px;flex-wrap:wrap">
+          <button class="mini primary" ${it.used_job ? "disabled" : ""}
+                  onclick="colPublish('${esc(it.key)}',false)">发到队列</button>
+          <button class="mini" ${it.used_job ? "disabled" : ""}
+                  onclick="colPublish('${esc(it.key)}',true)">立即发</button>
+          <a class="mini" style="display:inline-flex;align-items:center;text-decoration:none"
+             href="${esc(it.url)}" target="_blank" rel="noopener">看原帖</a>
+          <button class="mini ghost" onclick="colDelete('${esc(it.key)}')">删除</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+async function colPublish(key, now){
+  try {
+    const r = await api("/api/collect/publish", {method:"POST",
+      body:{key:key, with_source:true, immediately:!!now}});
+    toast(r.message || "已提交", "ok");
+    await loadCollectItems(); await loadCollect();
+  } catch(e){ toast("发布失败：" + e.message, "err"); }
+}
+
+async function colDelete(key){
+  try {
+    await api("/api/collect/delete", {method:"POST", body:{key:key}});
+    toast("已删除", "ok"); await loadCollectItems(); await loadCollect();
+  } catch(e){ toast("删除失败：" + e.message, "err"); }
+}
+
+async function colLogout(name){
+  if (!confirm("退出 " + name + " 的登录？以后要重新扫码。")) return;
+  try {
+    const r = await api("/api/collect/logout", {method:"POST", body:{platform:name}});
+    toast(r.message || "已退出", "ok"); await loadCollect();
+  } catch(e){ toast("退出失败：" + e.message, "err"); }
+}
+
+/* ── 扫码登录 ── */
+let colLoginTimer = null;
+let LAST_QR = "";
+let COL_LOGIN_PLATFORM = "";
+
+async function colLogin(name){
+  COL_LOGIN_PLATFORM = name;
+  $("col-login").hidden = false;
+  $("col-login-title").textContent = "扫码登录 · " + name;
+  $("col-login-qr").innerHTML = '<div class="empty">正在获取二维码…</div>';
+  $("col-login-msg").textContent = "";
+  try {
+    const r = await api("/api/collect/login/start", {method:"POST", body:{platform:name}});
+    if (r.qr) showCollectQr(r.qr);
+    toast(r.message || "请扫码", "ok");
+    clearInterval(colLoginTimer);
+    colLoginTimer = setInterval(async () => {
+      try {
+        const s = await api("/api/collect/login/status?platform=" + encodeURIComponent(name));
+        const st = s.status || {};
+        $("col-login-msg").textContent = st.message || "";
+        // 关键：每次轮询都同步二维码 —— 后台可能比这次请求慢才准备好
+        if (st.qr && st.qr !== LAST_QR) showCollectQr(st.qr);
+        if (!st.running){
+          clearInterval(colLoginTimer); colLoginTimer = null;
+          if (st.ok){
+            toast(st.message || "登录成功", "ok");
+            $("col-login").hidden = true;
+            await loadCollect();
+          } else if (st.message){
+            $("col-login-msg").textContent = st.message;
+          }
+        }
+      } catch(e){}
+    }, 2500);
+  } catch(e){
+    $("col-login-qr").innerHTML = '<div class="empty">获取二维码失败：' + esc(e.message) + '</div>';
+  }
+}
+
+// 重新生成（二维码过期 / 卡住时用）
+async function colLoginRestart(){
+  const name = COL_LOGIN_PLATFORM;
+  if (!name) return;
+  try {
+    const r = await api("/api/collect/login/start",
+                        {method:"POST", body:{platform:name, force:true}});
+    $("col-login-msg").textContent = r.message || "正在重新生成…";
+    if (r.qr) showCollectQr(r.qr);
+  } catch(e){ toast("重新生成失败：" + e.message, "err"); }
+}
+
+function showCollectQr(dataUrl){
+  if (!dataUrl){ $("col-login-qr").innerHTML = '<div class="empty">二维码还没准备好…</div>'; return; }
+  LAST_QR = dataUrl;
+  $("col-login-qr").innerHTML = '<img src="' + esc(dataUrl) +
+    '" alt="扫码登录" style="width:220px;height:220px;border-radius:10px;background:#fff;padding:8px">';
+}
+
+function colLoginClose(){
+  clearInterval(colLoginTimer); colLoginTimer = null;
+  $("col-login").hidden = true;
+}
+
+
+/* ── 发送页：从素材库挑图 ── */
+let pickerMounted = false;
+
+async function openLibraryPicker(){
+  const box = $("lib-picker");
+  if (!box) return;
+  if (!box.hidden){ box.hidden = true; return; }
+  box.hidden = false;
+  if (pickerMounted) return;
+  pickerMounted = true;
+  box.innerHTML =
+    '<div class="limits" style="margin-bottom:8px">点一张图，就填进上面的「媒体文件名」</div>' +
+    '<div class="meme-grid" id="lib-grid"><div class="limits">加载中…</div></div>';
+  try {
+    const r = await api("/api/memes");
+    const rows = r.templates || [];
+    $("lib-grid").innerHTML = rows.length
+      ? rows.map(t => '<div class="meme-tile" onclick="pickLibraryItem(\'' + esc(t.name) + '\')">' +
+          '<img src="' + esc(t.url) + '" alt="" loading="lazy">' +
+          '<div class="nm" title="' + esc(t.name) + '">' + esc(t.name) + '</div></div>').join("")
+      : '<div class="limits">素材库还是空的 —— 去「梗图」页上传或生成一张</div>';
+  } catch(e){
+    $("lib-grid").innerHTML = '<div class="limits">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function pickLibraryItem(name){
+  $("f-media").value = name;
+  pickedMedia = name;
+  $("lib-picker").hidden = true;
+  toast("已选素材：" + name, "ok");
+}
+
+/* ── 数据日报（core.analytics）────────────────────────── */
+let AN = null;
+let anDays = 92;
+let anTimer = null;
+let anStamp = "";
+
+const AN_ORDER = ["Displayed", "Fav", "Reply", "Retweet", "QuoteTweet",
+                  "Bookmark", "Follow", "ProfilePic", "TweetCreate"];
+const AN_KIND = {orig:"原创", quote:"引用", reply:"回复", retweet:"转帖"};
+
+function anNum(n){ return Number(n || 0).toLocaleString("en-US"); }
+
+function anOrdered(list){
+  const by = {};
+  (list || []).forEach(m => { by[m.key] = m; });
+  return AN_ORDER.filter(k => by[k]).map(k => by[k])
+    .concat((list || []).filter(m => AN_ORDER.indexOf(m.key) < 0));
+}
+
+// 账号级指标表：每一行都拆「认证用户 / 普通用户」
+// 默认只显示 9 个主要指标 —— 长区间里 X 会吐出一堆内部细分
+// （ArchiveFavorite / NotInterested / Mute…），全列出来太吵，折叠起来按需展开。
+let anShowAll = false;
+
+function anToggleAll(){
+  anShowAll = !anShowAll;
+  if (AN) renderAnalytics(AN);
+}
+
+function anMetricTable(list){
+  const all = anOrdered(list);
+  if (!all.length) return '<div class="empty">还没有数据 —— 点「刷新数据」采集一次</div>';
+  const main = all.filter(m => AN_ORDER.indexOf(m.key) >= 0);
+  const rows = anShowAll ? all : main;
+  const extra = all.length - main.length;
+  const num = 'style="font-variant-numeric:tabular-nums"';
+  let html = '<div class="tblwrap"><table><thead><tr>' +
+    '<th>指标</th><th style="width:120px">✅ 认证用户</th>' +
+    '<th style="width:120px">⚪ 普通用户</th><th style="width:120px">合计</th>' +
+    '</tr></thead><tbody>' +
+    rows.map(m => '<tr><td>' + esc(m.label) + '</td>' +
+      '<td ' + num + '>' + anNum(m.verified) + '</td>' +
+      '<td ' + num + '>' + anNum(m.normal) + '</td>' +
+      '<td ' + num + '><b>' + anNum(m.total) + '</b></td></tr>').join('') +
+    '</tbody></table></div>';
+  if (extra > 0 || anShowAll){
+    html += '<div style="margin-top:6px;font-size:12px">' +
+      '<a href="#" onclick="anToggleAll();return false" style="color:var(--info)">' +
+      (anShowAll ? '只显示主要指标' : '显示全部指标（另有 ' + extra + ' 项 X 细分指标）') +
+      '</a></div>';
+  }
+  return html;
+}
+
+function anTweetTable(rows, emptyText){
+  if (!rows || !rows.length) return '<div class="empty">' + esc(emptyText || "没有推文") + '</div>';
+  const num = 'style="font-variant-numeric:tabular-nums"';
+  return '<div class="tblwrap"><table><thead><tr>' +
+    '<th style="width:122px">时间(北京)</th><th style="width:62px">类型</th>' +
+    '<th style="width:82px">来源</th><th style="width:76px">浏览</th>' +
+    '<th style="width:62px">赞</th><th style="width:62px">评论</th>' +
+    '<th style="width:62px">转发</th><th>正文</th></tr></thead><tbody>' +
+    rows.map(t => {
+      const src = t.source === "bot"
+        ? '<span class="badge info">🤖 机器人</span>'
+        : '<span class="badge gray">👤 自己</span>';
+      return '<tr class="an-row" data-id="' + esc(t.tweet_id) + '" style="cursor:pointer">' +
+        '<td class="id">' + esc(fmtTime(t.created_at)) + '</td>' +
+        '<td>' + esc(AN_KIND[t.kind] || t.kind) + '</td>' +
+        '<td>' + src + '</td>' +
+        '<td ' + num + '>' + anNum(t.views) + '</td>' +
+        '<td ' + num + '>' + anNum(t.likes) + '</td>' +
+        '<td ' + num + '>' + anNum(t.replies) + '</td>' +
+        '<td ' + num + '>' + anNum(t.retweets) + '</td>' +
+        '<td class="txt">' + esc((t.text || "").slice(0, 70)) + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function anStatBlock(items){
+  return '<div style="display:flex;gap:28px;flex-wrap:wrap;margin:0 0 16px">' +
+    items.map(([v, label, big]) => '<div class="stat"><b' +
+      (big ? ' class="big"' : '') + '>' + anNum(v) + '</b><span>' + esc(label) + '</span></div>')
+      .join('') + '</div>';
+}
+
+function renderAnalytics(d){
+  AN = d;
+  const box = $("an-summary");
+  if (!d || !d.ok){
+    box.innerHTML = '<div class="empty">' +
+      esc((d && d.error) || "暂无数据，点「刷新数据」采集一次") + '</div>';
+    return;
+  }
+  const s = d.today_split || {};
+  const bot = s.bot || {count:0, views:0, likes:0};
+  const man = s.manual || {count:0, views:0, likes:0};
+
+  let html = '';
+  html += '<div class="sub" style="margin:0 0 8px"><b>今日实时</b>（' +
+    esc(d.today || "") + '，UTC 日为界）· 今天发的帖子，指标是当前值</div>';
+  html += anStatBlock([
+    [s.views, "今日帖浏览", true],
+    [s.count, "今日发帖"],
+    [s.likes, "今日帖点赞"],
+    [bot.views, "🤖 机器人发 " + anNum(bot.count) + " 条"],
+    [man.views, "👤 自己发 " + anNum(man.count) + " 条"],
+  ]);
+  html += anTweetTable(d.today_tweets, "今天还没有发帖");
+
+  const accDay = d.account_day || "";
+  html += '<div class="sub" style="margin:18px 0 8px"><b>账号数据 · ' +
+    esc(accDay || "无") + '</b>' +
+    (accDay && !d.account_is_today
+      ? ' <span class="hint">X 最新完整日（账号级数据 X 只发完整的一天）</span>' : '') +
+    '</div>';
+  html += anMetricTable(d.account_metrics);
+
+  html += '<div class="sub" style="margin:18px 0 8px"><b>近 ' + anNum(anDays) + ' 天</b>（' +
+    esc(d.range_from || "") + ' ~ ' + esc(d.range_to || "") + '）· 发帖 ' +
+    anNum(d.range_posts) + ' 条</div>';
+  html += anMetricTable(d.range_metrics);
+
+  box.innerHTML = html;
+  box.querySelectorAll(".an-row").forEach(tr => {
+    tr.onclick = () => anShowTweet(tr.dataset.id);
+  });
+}
+
+// 单条推文：只给真实总量（X 不提供单条的认证/普通拆分）
+async function anShowTweet(tid){
+  const box = $("an-detail");
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const r = await api("/api/analytics/tweet/" + encodeURIComponent(tid));
+    const t = r.tweet || {};
+    const a = t.activity || null;
+    const num = 'style="font-variant-numeric:tabular-nums"';
+    const kv = (label, v) => '<div class="stat"><b ' + num + '>' + anNum(v) +
+      '</b><span>' + esc(label) + '</span></div>';
+    box.innerHTML =
+      '<div style="border:1px solid var(--line);border-radius:var(--radius);padding:14px;margin-top:14px">' +
+      '<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">' +
+        '<b>📌 ' + esc(t.tweet_id || "") + '</b>' +
+        '<span class="badge ' + (t.source === "bot" ? "info" : "gray") + '">' +
+          (t.source === "bot" ? "🤖 机器人发" : "👤 自己发") + ' · ' +
+          esc(AN_KIND[t.kind] || t.kind || "") + '</span>' +
+      '</div>' +
+      '<div class="sub" style="margin:8px 0 12px">🕐 ' + esc(fmtTime(t.created_at)) +
+        (t.media_count ? ' · 🖼 ' + anNum(t.media_count) + " 张图" : "") + '</div>' +
+      '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px">' +
+        kv("浏览量", t.views) + kv("点赞", t.likes) + kv("评论", t.replies) +
+        kv("转发", t.retweets) + kv("引用", t.quotes) + kv("收藏", t.bookmarks) +
+      '</div>' +
+      (a ? '<div class="sub" style="margin:0 0 8px">作者分析（X 只在账号级给认证/普通拆分，单条没有）</div>' +
+           '<div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px">' +
+           kv("曝光", a.impressions) + kv("参与", a.engagements) +
+           kv("详情展开", a.detail_expands) + kv("资料访问", a.profile_visits) +
+           kv("链接点击", a.link_clicks) + kv("涨粉", a.follows) + '</div>' : '') +
+      '<div style="white-space:pre-wrap;font-size:13.5px;margin-bottom:12px">' +
+        esc(t.text || "") + '</div>' +
+      '<div style="display:flex;gap:8px">' +
+        '<a class="mini primary" href="' + esc(t.url || "#") + '" target="_blank" rel="noopener">在 X 打开</a>' +
+        '<button class="mini ghost" onclick="document.getElementById(\'an-detail\').innerHTML=\'\'">收起</button>' +
+      '</div></div>';
+  } catch(e){
+    box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  }
+}
+
+async function loadAnalytics(){
+  try {
+    renderAnalytics(await api("/api/analytics/summary?days=" + anDays));
+  } catch(e){
+    $("an-summary").innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function anPickRange(days){
+  anDays = days;
+  document.querySelectorAll(".an-range").forEach(b => {
+    b.className = "mini" + (Number(b.dataset.days) === days ? " primary" : "");
+  });
+  loadAnalytics();
+}
+
+async function anRefresh(){
+  const btn = $("btn-an-refresh");
+  btn.disabled = true; btn.textContent = "采集中…";
+  $("an-progress").textContent = "正在启动…";
+  try {
+    await api("/api/analytics/refresh?days=" + anDays, {method: "POST"});
+    toast("已开始采集（要开浏览器，约 20~60 秒）", "ok");
+  } catch(e){
+    toast("启动采集失败：" + e.message, "err");
+    btn.disabled = false; btn.textContent = "刷新数据";
+    $("an-progress").textContent = "";
+    return;
+  }
+  let n = 0;
+  clearInterval(anTimer);
+  anTimer = setInterval(async () => {
+    n++;
+    let pr = {};
+    try { pr = (await api("/api/analytics/status")).progress || {}; } catch(e){}
+    $("an-progress").textContent = pr.running ? (pr.message || "采集中…") : "";
+    if (!pr.running || n > 90){
+      clearInterval(anTimer); anTimer = null;
+      btn.disabled = false; btn.textContent = "刷新数据";
+      if (pr.ok) toast("采集完成", "ok");
+      else if (pr.error) toast("采集失败：" + pr.error, "err");
+      await loadAnalytics();
+    }
+  }, 2000);
+}
+
 /* ── 绑定与启动 ───────────────────────────────────────── */
 function bind(){
+  bindTabs();
   $("btn-pause").onclick = togglePause;
   $("btn-post").onclick = submitJob;
   $("btn-save").onclick = saveSettings;
+  $("btn-an-refresh").onclick = anRefresh;
+  document.querySelectorAll(".an-range").forEach(b => {
+    b.onclick = () => anPickRange(Number(b.dataset.days));
+  });
   $("f-text").addEventListener("input", updateCounter);
   ["s-prefix", "s-suffix"].forEach(id => $(id).addEventListener("input", () => {
     settingsDirty = true; prefix = $("s-prefix").value; suffix = $("s-suffix").value; updateCounter();
@@ -1031,24 +2084,24 @@ function bind(){
   $("btn-tg-stop").onclick    = () => tgAction("stop");
   $("btn-tg-restart").onclick = () => tgAction("restart");
   $("tg-auto").addEventListener("change", saveTgSettings);
-  ["tg-users", "tg-chats"].forEach(id =>
-    $(id).addEventListener("blur", saveTgSettings));
+  $("tg-chats").addEventListener("blur", saveTgSettings);
+  $("btn-tg-add-admin").onclick = addAdmin;
+  $("tg-add-admin").addEventListener("keydown", e => {
+    if (e.key === "Enter") addAdmin();
+  });
 
   // ── 媒体选择/拖放 ──
-  const drop = $("drop"), fi = $("f-file");
-  drop.addEventListener("click", (e) => { if (!e.target.closest(".picked")) fi.click(); });
-  fi.addEventListener("change", () => { if (fi.files[0]) uploadFile(fi.files[0]); });
-  ["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => {
-    e.preventDefault(); e.stopPropagation(); drop.classList.add("over");
-  }));
-  ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => {
-    e.preventDefault(); e.stopPropagation(); drop.classList.remove("over");
-  }));
-  drop.addEventListener("drop", e => {
-    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    if (f) uploadFile(f);
+  // 素材库选择器（发送页用）
+  $("btn-lib-pick").onclick = openLibraryPicker;
+  // 采集页筛选
+  $("btn-col-refresh").onclick = loadCollectItems;
+  ["col-min-likes", "col-min-comments", "col-unused"].forEach(id =>
+    $(id).addEventListener("change", loadCollectItems));
+
+  $("f-state").addEventListener("change", () => {
+    const f = $("f-state").files && $("f-state").files[0];
+    if (f) doUploadState(f);
   });
-  $("f-media").addEventListener("input", () => { pickedMedia = $("f-media").value.trim(); });
 
   // ── 账号密码登录 ──
   $("btn-pw-login").onclick = () => loginWithPassword("");
@@ -1095,15 +2148,31 @@ function startPolling(){
   pollTimer = setInterval(refreshAll, 4000);
 }
 
-bind();
-startSSE();
-setTimeout(() => { if (!STATE) startPolling(); }, 2500);   // SSE 首帧没到就兜底
+async function bootConsole(){
+  try {
+    const me = await api("/api/auth/me");
+    ACCOUNT = me.username || me.account || "legacy";
+    hideAuthGate();
+    $("whoami").textContent = "当前账号 · " + ACCOUNT;
+  } catch(e) {
+    showAuthGate(e.status === 401 ? "" : ("无法连接控制台：" + (e.message || "未知错误")));
+    return;
+  }
+  if (consoleBooted) return;
+  consoleBooted = true;
+  bind();
+  startSSE();
+  setTimeout(() => { if (!STATE) startPolling(); }, 2500);   // SSE 首帧没到就兜底
+  anPickRange(92);        // 日报：默认近三月，并立即读一次本地数据
+  loadTgContacts();       // 管理员：列出最近跟机器人说过话的人，可一键加
+  loadAdmins();           // 管理员列表 + 待审批申请
+  showTab(location.hash.slice(1) || (localStorage.getItem(TAB_KEY)) || "overview");
+}
 
-// 登录态文件选择
-(function(){
-  const el = document.getElementById('state-file');
-  if (el) el.addEventListener('change', e => uploadStateFile(e.target.files[0]));
-})();
+$("auth-form").addEventListener("submit", doConsoleLogin);
+$("btn-logout").addEventListener("click", consoleLogout);
+bootConsole();
 </script>
+
 </body>
 </html>

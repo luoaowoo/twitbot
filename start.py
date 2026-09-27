@@ -25,10 +25,11 @@ import logging
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core import config, lock, queue  # noqa: E402
+from core import accounts, config, lock  # noqa: E402
 
 log = logging.getLogger("twitbot.start")
 
@@ -36,18 +37,88 @@ log = logging.getLogger("twitbot.start")
 _CRASH_FH = None
 
 
-def should_start_tg(no_tg: bool = False, force_tg: bool = False) -> bool:
-    """是否拉起 Telegram 机器人。
+# ── 数据日报定时采集 ──
+AN_COLLECT_DAYS = 92                 # 采多长历史（近三月）
+AN_COLLECT_INTERVAL = 6 * 3600       # 距上次超过 6 小时才重采
+AN_COLLECT_POLL = 1800               # 每 30 分钟检查一次
+AN_COLLECT_FIRST_DELAY = 90          # 启动后先等一会，别跟发布抢启动瞬间
 
-    优先级：`--no-tg` > `--tg` > 控制台设置 `tg_autostart`。
-    默认值在 `core.settings.DEFAULTS` 里（"1" = 开），所以不传 fallback。
+
+async def _analytics_loop(account_name: str | None = None) -> None:
+    """定时刷新当前账号的数据日报。"""
+    with accounts.use_account(account_name):
+        from core import analytics
+
+        await asyncio.sleep(AN_COLLECT_FIRST_DELAY)
+        while True:
+            try:
+                age = analytics.collect_age_seconds()
+                if age > AN_COLLECT_INTERVAL:
+                    log.info("数据日报[%s]：距上次采集 %.1f 小时，开始采集…",
+                             account_name or "legacy",
+                             age / 3600.0 if age != float("inf") else -1.0)
+                    res = await asyncio.to_thread(analytics.refresh, AN_COLLECT_DAYS)
+                    if res.get("ok"):
+                        log.info("数据日报[%s]：采集完成 %s", account_name or "legacy", res.get("saved"))
+                    else:
+                        log.warning("数据日报[%s]：采集失败 %s", account_name or "legacy", res.get("error"))
+            except asyncio.CancelledError:
+                log.info("数据日报定时任务退出[%s]", account_name or "legacy")
+                raise
+            except Exception as e:
+                log.warning("数据日报定时任务异常（忽略）[%s]：%s", account_name or "legacy", e)
+            await asyncio.sleep(AN_COLLECT_POLL)
+
+
+REVIEW_POLL_SECONDS = 60          # 每分钟看一眼「到点没」
+
+
+async def _review_loop(tg_managers) -> None:
+    """每小时间隔把 1 条采集内容推给管理员审核，通过才发到 X。
+
+    默认**关闭**（review_config.enabled=0），用户开了才跑 ——
+    用户明确要求「不要直接发」。
     """
+    await asyncio.sleep(150)
+    while True:
+        try:
+            from core.collect import review as _rv
+            if _rv.due():
+                mgr = None
+                try:
+                    mgr = next(iter((tg_managers or {}).values()), None)
+                except Exception:
+                    mgr = None
+                app = getattr(mgr, "_app", None) if mgr else None
+                if app is not None:
+                    from core import tgmanager as _tgm
+                    try:
+                        botmod = _tgm._load_bot_module()
+                        ok, why = await botmod.review_push_next(app)
+                        log.info("待审推送：%s（%s）", ok, why)
+                    except Exception as e:
+                        log.warning("待审推送异常：%s", type(e).__name__)
+                else:
+                    log.debug("机器人没在跑，跳过待审推送")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("待审循环异常（忽略）：%s", e)
+        await asyncio.sleep(REVIEW_POLL_SECONDS)
+
+
+def should_start_tg(no_tg: bool = False, force_tg: bool = False) -> bool:
+    """是否拉起 Telegram 机器人。按账号读取，任一账号开启就尝试拉起。"""
     if no_tg:
         return False
     if force_tg:
         return True
     from core import settings
-    return settings.get("tg_autostart", "1") == "1"
+    for name in accounts.account_names():
+        with accounts.use_account(name):
+            if settings.get("tg_autostart", "1") == "1":
+                return True
+    return False
 
 
 def _banner(mode: str, tg_state: str) -> None:
@@ -57,8 +128,9 @@ def _banner(mode: str, tg_state: str) -> None:
     print("  twitbot —— Telegram / Web → X 自动发帖")
     print("=" * 64)
     print(f"  模式        : {mode}")
-    print(f"  发布后端    : {cfg['backend']}")
+    print(f"  发布后端    : {cfg['backend']}（每个账号各自设置）")
     print(f"  数据目录    : {config.DATA_DIR}")
+    print(f"  控制台账号  : {' / '.join(accounts.account_names())}（数据完全独立）")
     if mode != "worker-only":
         url = f"http://{config.WEB_HOST}:{config.WEB_PORT}"
         print(f"  控制台      : {url}")
@@ -69,47 +141,82 @@ def _banner(mode: str, tg_state: str) -> None:
 
 
 async def _run(args: argparse.Namespace) -> None:
-    from core import pipeline, settings
+    from core import pipeline
+
+    accounts.install_path_router()
+    accounts.init_accounts()
+    account_list = list(accounts.account_names())
 
     tasks: list[asyncio.Task] = []
-    pipe = None
-    tg_mgr = None
+    pipes: dict[str, Any] = {}
+    tg_managers: dict[str, Any] = {}
 
-    # ── 发布循环 ──
+    # ── 每个账号独立发布循环 ──
     if not args.web_only:
-        pipe = pipeline.Pipeline()
+        for account_name in account_list:
+            with accounts.use_account(account_name):
+                pipe = pipeline.Pipeline()
+            pipes[account_name] = pipe
 
-        async def _worker() -> None:
-            log.info("发布循环启动，后端=%s", settings.current_backend())
-            await pipe.run_forever()
+            async def _worker(name: str = account_name, p: Any = pipe) -> None:
+                with accounts.use_account(name):
+                    from core import settings
+                    log.info("发布循环[%s]启动，后端=%s", name, settings.current_backend())
+                    await p.run_forever()
 
-        tasks.append(asyncio.create_task(_worker(), name="pipeline"))
+            tasks.append(asyncio.create_task(_worker(), name=f"pipeline-{account_name}"))
+            # ── 数据日报：每个账号独立采集/存储 ──
+            tasks.append(asyncio.create_task(
+                _analytics_loop(account_name), name=f"analytics-{account_name}"))
 
-    # ── Telegram 机器人（没 token 只警告不致命）──
-    # 是否拉起：--no-tg / --tg 显式指定优先，否则跟随控制台里的
-    # 「启动 twitbot 时自动拉起机器人」设置（tg_autostart，默认开）。
+    # ── Telegram：每个账号独立管理自己的 token/设置/队列 ──
+    # 采集内容的人工审核（每小时推 1 条，通过才发）—— 全局一个就够
+    tasks.append(asyncio.create_task(_review_loop(tg_managers), name="review"))
+
     tg_wanted = should_start_tg(no_tg=args.no_tg, force_tg=args.tg)
-
     tg_state = "未拉起"
     if tg_wanted:
-        try:
-            from core.tgmanager import TelegramManager  # noqa: PLC0415
-            tg_mgr = TelegramManager(on_log=lambda m: log.info("[tg] %s", m))
-            ok, why = await tg_mgr.start()
-            if ok:
-                st = tg_mgr.status()
+        from core.tgmanager import TelegramManager  # noqa: PLC0415
+        states: list[str] = []
+        for account_name in account_list:
+            try:
+                with accounts.use_account(account_name):
+                    mgr = TelegramManager(
+                        on_log=lambda m, n=account_name: log.info("[tg:%s] %s", n, m))
+                    ok, why = await mgr.start()
+                tg_managers[account_name] = mgr
+                st = mgr.status()
                 who = st.get("bot_username") or "?"
-                tg_state = f"已启动（@{who.lstrip('@')}）" if st.get("running") else "已就绪"
-                log.info("Telegram 机器人已启动：%s", why)
-            else:
-                tg_state = f"未启动（{why}）"
-                log.warning(
-                    "Telegram 未启动：%s\n"
-                    "        → 可在 Web 控制台的「Telegram 机器人」面板里填 token 启动，"
-                    "或运行 python setup_tg.py", why)
+                if ok:
+                    label = f"已启动（@{who.lstrip('@')}）" if st.get("running") else "已就绪"
+                    log.info("Telegram[%s]已启动：%s", account_name, why)
+                else:
+                    label = f"未启动（{why}）"
+                    log.warning(
+                        "Telegram[%s]未启动：%s\n"
+                        "        → 可在 Web 控制台的「Telegram 机器人」面板里填 token 启动，"
+                        "或运行 python setup_tg.py", account_name, why)
+                states.append(f"{account_name}: {label}")
+            except Exception as e:
+                states.append(f"{account_name}: 未启动（{type(e).__name__}）")
+                log.warning("Telegram[%s]模块加载/启动异常（不影响其它账号）：%s",
+                            account_name, e)
+        tg_state = "；".join(states) if states else "未拉起"
+
+    # 把常驻 pipeline 注册给 bot 模块（如 bot 支持账号参数则按账号注册）。
+    for account_name, pipe in pipes.items():
+        try:
+            from core import tgmanager as _tgm  # noqa: PLC0415
+            botmod = _tgm._load_bot_module()
+            if hasattr(botmod, "set_pipeline_instance"):
+                try:
+                    botmod.set_pipeline_instance(pipe, username=account_name)
+                except TypeError:
+                    botmod.set_pipeline_instance(pipe)
+                log.info("已把发布循环实例注册给 Telegram 回调[%s]", account_name)
         except Exception as e:
-            tg_state = f"未启动（{type(e).__name__}）"
-            log.warning("Telegram 模块加载/启动异常（不影响 Web 与发布）：%s", e)
+            log.debug("注册 pipeline 给 bot 模块失败（不影响运行）[%s]：%s",
+                      account_name, e)
 
     # ── Web 控制台（同进程，共用事件循环）──
     server = None
@@ -118,20 +225,16 @@ async def _run(args: argparse.Namespace) -> None:
         from web.server import create_app  # noqa: PLC0415
         from web import server as web_server  # noqa: PLC0415
 
-        # 把正在跑的实例注入控制台：控制台的「立即发送」复用同一个循环实例，
-        # 「启停机器人」控制的也是同一个 Telegram 轮询。
-        if pipe is not None and hasattr(web_server, "set_pipeline_instance"):
+        for account_name, pipe in pipes.items():
             try:
-                web_server.set_pipeline_instance(pipe)
-                log.info("已把发布循环实例注入 Web 控制台")
+                web_server.set_pipeline_instance(pipe, account_name)
             except Exception as e:
-                log.warning("注入 pipeline 实例失败（控制台将自建，不影响运行）：%s", e)
-        if tg_mgr is not None and hasattr(web_server, "set_tg_manager_instance"):
+                log.warning("注入 pipeline 实例失败[%s]：%s", account_name, e)
+        for account_name, mgr in tg_managers.items():
             try:
-                web_server.set_tg_manager_instance(tg_mgr)
-                log.info("已把 Telegram 管理器注入 Web 控制台")
+                web_server.set_tg_manager_instance(mgr, account_name)
             except Exception as e:
-                log.warning("注入 Telegram 管理器失败（控制台将自建，不影响运行）：%s", e)
+                log.warning("注入 Telegram 管理器失败[%s]：%s", account_name, e)
 
         app = create_app()
         cfg = uvicorn.Config(
@@ -175,16 +278,17 @@ async def _run(args: argparse.Namespace) -> None:
             log.error("任务 %s 异常退出：%s", t.get_name(), exc)
 
     # ── 收尾 ──
-    if pipe is not None:
-        pipe.stop()          # 请求发布循环优雅退出（不打断正在发的这一条）
-        await asyncio.sleep(0)
+    for pipe in pipes.values():
+        pipe.stop()
+    await asyncio.sleep(0)
     if server is not None:
         server.should_exit = True
-    if tg_mgr is not None:
+    for account_name, mgr in tg_managers.items():
         try:
-            await tg_mgr.stop()
+            with accounts.use_account(account_name):
+                await mgr.stop()
         except Exception as e:
-            log.warning("Telegram 收尾异常：%s", e)
+            log.warning("Telegram 收尾异常[%s]：%s", account_name, e)
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -236,6 +340,7 @@ def _setup_logging() -> None:
 
 def main() -> None:
     config.setup_console()
+    accounts.install_path_router()
     ap = argparse.ArgumentParser(
         description="twitbot 统一启动器（默认拉起 Web + 发布循环 + Telegram）")
     ap.add_argument("--no-tg", action="store_true", help="不拉起 Telegram 机器人")
@@ -254,9 +359,8 @@ def main() -> None:
 
     _setup_logging()
 
-    queue.init_db()
-    from core import settings as _s
-    _s.all_settings()      # 建 settings 表
+    # 先建两个账号各自的目录/数据库；_run 里还会做幂等初始化。
+    accounts.init_accounts()
 
     lk = lock.single_instance_lock()
     if lk is None:

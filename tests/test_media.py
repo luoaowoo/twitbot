@@ -269,7 +269,7 @@ TRAVERSAL = [
     "../evil.jpg",
     "..%2Fevil.jpg",
     "/etc/passwd",
-    "/absolute/home/user/evil.jpg",
+    "/absolute/root/evil.jpg",
     "C:\\Windows\\evil.jpg",
     "C:/Windows/evil.jpg",
     "\\\\server\\share\\evil.jpg",

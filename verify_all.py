@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import http.cookiejar as cookiejar
 import os
 import shutil
 import subprocess
@@ -73,8 +74,15 @@ def run(args: list[str], timeout: int = 120, **envx) -> subprocess.CompletedProc
     )
 
 
-def http(path: str, method: str = "GET", body: dict | None = None, port: int = 8899,
-         token: str = "") -> tuple[int, str]:
+_COOKIE_JARS: dict[int, cookiejar.CookieJar] = {}
+
+
+def _cookie_jar(port: int) -> cookiejar.CookieJar:
+    return _COOKIE_JARS.setdefault(port, cookiejar.CookieJar())
+
+
+def _request(path: str, method: str = "GET", body: dict | None = None,
+             port: int = 8899, token: str = "") -> tuple[int, str]:
     url = f"http://127.0.0.1:{port}{path}"
     if token:
         url += ("&" if "?" in url else "?") + f"token={token}"
@@ -82,13 +90,33 @@ def http(path: str, method: str = "GET", body: dict | None = None, port: int = 8
     req = urllib.request.Request(url, data=data, method=method)
     if data:
         req.add_header("Content-Type", "application/json")
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(_cookie_jar(port)))
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
+        with opener.open(req, timeout=10) as r:
             return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "replace")
     except Exception as e:
         return 0, f"{type(e).__name__}: {e}"
+
+
+def _console_login(port: int) -> bool:
+    code, _body = _request("/api/auth/login", "POST", {
+        "username": "qwqcon",
+        "password": "qwqcon_qwqcon",
+    }, port=port)
+    return code == 200
+
+
+def http(path: str, method: str = "GET", body: dict | None = None, port: int = 8899,
+         token: str = "") -> tuple[int, str]:
+    """请求控制台；数据接口首次遇到 401 时自动用测试账号登录。"""
+    code, text = _request(path, method, body, port, token)
+    if code == 401 and path not in ("/api/auth/login", "/api/auth/logout"):
+        if _console_login(port):
+            return _request(path, method, body, port, token)
+    return code, text
 
 
 # ═══════════════════════════════════════════════════════════

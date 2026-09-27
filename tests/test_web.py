@@ -196,6 +196,76 @@ def test_enqueue_awaiting_status(client):
     assert r.json()["status"] == "awaiting"
 
 
+def test_enqueue_reply_from_url(client):
+    """评论目标接受整条链接，库里存成 r:<id>（与引用区分）。"""
+    r = client.post("/api/jobs", json={
+        "text": "说得对", "reply_to": "https://x.com/someone/status/1234567890"})
+    assert r.status_code == 200, r.text
+    assert r.json()["job"]["quote_id"] == "r:1234567890"
+
+
+def test_enqueue_reply_from_bare_id(client):
+    r = client.post("/api/jobs", json={"text": "同意", "reply_to": "1234567890"})
+    assert r.status_code == 200, r.text
+    assert r.json()["job"]["quote_id"] == "r:1234567890"
+
+
+def test_enqueue_reply_overrides_quote(client):
+    """同时填了引用和评论时，评论优先 —— 绝不能发成引用转发。"""
+    r = client.post("/api/jobs", json={
+        "text": "评论", "reply_to": "1234567890", "quote_id": "9999999999"})
+    assert r.status_code == 200, r.text
+    assert r.json()["job"]["quote_id"] == "r:1234567890"
+
+
+def test_enqueue_reply_bad_target_rejected(client):
+    r = client.post("/api/jobs", json={"text": "评论", "reply_to": "不是链接"})
+    assert r.status_code == 400
+
+
+def test_enqueue_retweet_from_url(client):
+    """转帖目标存成 t:<id>，与 r:<id>（评论）分开。"""
+    r = client.post("/api/jobs", json={
+        "retweet_to": "https://x.com/someone/status/1234567890"})
+    assert r.status_code == 200, r.text
+    assert r.json()["job"]["quote_id"] == "t:1234567890"
+    assert r.json()["job"]["raw_text"] == ""
+
+
+def test_enqueue_retweet_from_bare_id(client):
+    r = client.post("/api/jobs", json={"retweet_to": "1234567890"})
+    assert r.status_code == 200, r.text
+    assert r.json()["job"]["quote_id"] == "t:1234567890"
+
+
+def test_enqueue_retweet_rejects_text(client):
+    """转帖不能带正文：静默丢掉用户写的字比报错更糟。"""
+    r = client.post("/api/jobs", json={
+        "text": "我要配文字", "retweet_to": "1234567890"})
+    assert r.status_code == 400
+    assert "引用" in r.json()["error"]        # 应当提示用户改用「引用」
+
+
+def test_enqueue_retweet_bad_target_rejected(client):
+    r = client.post("/api/jobs", json={"retweet_to": "不是链接"})
+    assert r.status_code == 400
+
+
+def test_enqueue_reply_beats_retweet(client):
+    """同时填了评论和转帖：评论优先，绝不能发成转帖。"""
+    r = client.post("/api/jobs", json={
+        "text": "评论内容", "reply_to": "1234567890", "retweet_to": "9999999999"})
+    assert r.status_code == 200, r.text
+    assert r.json()["job"]["quote_id"] == "r:1234567890"
+
+
+def test_retweet_needs_no_text_or_media(client):
+    """只有 retweet_to、没有正文/媒体，也必须能入队（否则转帖根本没法用）。"""
+    r = client.post("/api/jobs", json={"retweet_to": "5555555555"})
+    assert r.status_code == 200, r.text
+    assert r.json()["kind"] == "text"
+
+
 # ── 3. cancel / requeue ───────────────────────────────────
 
 def test_cancel_takes_effect(client):
@@ -726,97 +796,3 @@ def _ok_stub(name: str):
             raise AssertionError
         def login(self, on_event=None): return True, "无需登录"
     return Stub(name)
-
-
-# ══════════════════════════════════════════════════════════
-# 控制台密码门（服务器版专属）
-#   服务器暴露在网络里，光靠 ?token= 不够 —— 会出现在 URL / 历史记录里。
-#   这里做成"登录页 + 会话 Cookie"：密码只在登录时出现一次。
-# ══════════════════════════════════════════════════════════
-
-@pytest.fixture()
-def pw_client(monkeypatch):
-    """开启密码门的 client（默认测试环境是关闭的）。"""
-    from web import server as ws
-    monkeypatch.setenv("WEB_PASSWORD", "test_pw_123")
-    ws._sessions.clear()
-    app = ws.create_app()
-    with TestClient(app) as c:
-        yield c
-    ws._sessions.clear()
-
-
-def test_password_gate_shows_login_page(pw_client):
-    """未登录用浏览器访问 -> 给登录页（不是 401 白屏）。"""
-    r = pw_client.get("/", headers={"Accept": "text/html"})
-    assert r.status_code == 200
-    assert "请输入管理密码" in r.text
-
-
-def test_password_gate_blocks_api_without_login(pw_client):
-    """未登录调接口 -> 401（不是 200）。"""
-    r = pw_client.get("/api/status")
-    assert r.status_code == 401
-    assert "未登录" in r.json()["error"]
-
-
-def test_password_gate_rejects_wrong_password(pw_client):
-    r = pw_client.post("/login", json={"password": "nope"})
-    assert r.status_code == 401
-    assert "不正确" in r.json()["error"]
-
-
-def test_password_gate_rejects_empty_password(pw_client):
-    r = pw_client.post("/login", json={"password": ""})
-    assert r.status_code == 401
-
-
-def test_password_gate_accepts_correct_password(pw_client):
-    r = pw_client.post("/login", json={"password": "test_pw_123"})
-    assert r.status_code == 200
-    assert "twitbot_session" in r.cookies
-
-
-def test_password_gate_allows_after_login(pw_client):
-    """登录后接口应放行。"""
-    pw_client.post("/login", json={"password": "test_pw_123"})
-    r = pw_client.get("/api/status")
-    assert r.status_code == 200
-    assert "backend" in r.json()
-
-
-def test_password_gate_logout_revokes(pw_client):
-    """登出后会话立即失效。"""
-    pw_client.post("/login", json={"password": "test_pw_123"})
-    assert pw_client.get("/api/status").status_code == 200
-    pw_client.post("/logout")
-    assert pw_client.get("/api/status").status_code == 401
-
-
-def test_password_gate_healthz_always_open(pw_client):
-    """健康检查不拦 —— 监控系统不该需要密码。"""
-    r = pw_client.get("/healthz")
-    assert r.status_code == 200
-
-
-def test_password_gate_disabled_with_dash(monkeypatch):
-    """WEB_PASSWORD=- 表示关闭密码门（供测试/内网使用）。"""
-    from web import server as ws
-    monkeypatch.setenv("WEB_PASSWORD", "-")
-    ws._sessions.clear()
-    with TestClient(ws.create_app()) as c:
-        assert c.get("/api/status").status_code == 200
-
-
-def test_password_gate_default_password():
-    """不设 WEB_PASSWORD 时用内置默认值。"""
-    from web import server as ws
-    assert callable(getattr(ws, "_load_or_create_password", None))
-
-
-def test_session_token_is_random_and_not_the_password(pw_client):
-    """会话 token 必须随机，绝不能等于密码本身。"""
-    r = pw_client.post("/login", json={"password": "test_pw_123"})
-    tok = r.cookies.get("twitbot_session")
-    assert tok and tok != "test_pw_123"
-    assert len(tok) >= 32, "会话 token 太短，容易猜"
