@@ -336,10 +336,10 @@
 <div class="auth-gate" id="auth-gate">
   <form class="auth-card" id="auth-form">
     <h1>twitbot 控制台</h1>
-    <p>请先登录。两个账号的数据、队列和发布后端完全独立。</p>
+    <p>请先登录。各账号的数据、队列和发布后端完全独立。</p>
     <label for="auth-user">账号</label>
     <input id="auth-user" name="username" autocomplete="username" autofocus
-           placeholder="qwqcon / luoaowoo" required>
+           placeholder="请输入账号" required>
     <label for="auth-pass">密码</label>
     <input id="auth-pass" name="password" type="password" autocomplete="current-password"
            placeholder="请输入密码" required>
@@ -1760,7 +1760,29 @@ function showCollectQrLoading(){
   LAST_QR = "";
   $("col-login-qr").innerHTML =
     '<div class="qr-loading"><span class="spinner"></span>' +
-    '<span>正在生成二维码，首次约 10 秒…</span></div>';
+    '<span>正在生成二维码，通常几秒…</span></div>';
+}
+
+function startColLoginPolling(name){
+  clearInterval(colLoginTimer);
+  colLoginTimer = setInterval(async () => {
+    try {
+      const s = await api("/api/collect/login/status?platform=" + encodeURIComponent(name));
+      const st = s.status || {};
+      $("col-login-msg").textContent = st.message || "";
+      if (st.qr && st.qr !== LAST_QR) showCollectQr(st.qr);
+      if (!st.running){
+        clearInterval(colLoginTimer); colLoginTimer = null;
+        if (st.ok){
+          toast(st.message || "登录成功", "ok");
+          $("col-login").hidden = true;
+          await loadCollect();
+        } else if (st.message){
+          $("col-login-msg").textContent = st.message;
+        }
+      }
+    } catch(e){}
+  }, 2500);
 }
 
 async function colLogin(name){
@@ -1770,31 +1792,23 @@ async function colLogin(name){
   showCollectQrLoading();
   $("col-login-msg").textContent = "";
   try {
-    // 每次打开都强制重新生成，避免拿到上一次过期/失效的二维码。
+    // 先看后台有没有还没过期的二维码；有就直接显示，别每次重开都重新生成。
+    const s = await api("/api/collect/login/status?platform=" + encodeURIComponent(name));
+    const st = s.status || {};
+    const fresh = st.running && st.qr &&
+                  (st.age_seconds == null || st.age_seconds < 220);
+    if (fresh){
+      showCollectQr(st.qr);
+      $("col-login-msg").textContent = st.message || "请扫码";
+      startColLoginPolling(name);
+      return;
+    }
+    // 没有可用二维码才开始生成；force 交给「重新生成」按钮。
     const r = await api("/api/collect/login/start",
-                        {method:"POST", body:{platform:name, force:true}});
+                        {method:"POST", body:{platform:name}});
     if (r.qr) showCollectQr(r.qr);
     toast(r.message || "请扫码", "ok");
-    clearInterval(colLoginTimer);
-    colLoginTimer = setInterval(async () => {
-      try {
-        const s = await api("/api/collect/login/status?platform=" + encodeURIComponent(name));
-        const st = s.status || {};
-        $("col-login-msg").textContent = st.message || "";
-        // 关键：每次轮询都同步二维码 —— 后台可能比这次请求慢才准备好
-        if (st.qr && st.qr !== LAST_QR) showCollectQr(st.qr);
-        if (!st.running){
-          clearInterval(colLoginTimer); colLoginTimer = null;
-          if (st.ok){
-            toast(st.message || "登录成功", "ok");
-            $("col-login").hidden = true;
-            await loadCollect();
-          } else if (st.message){
-            $("col-login-msg").textContent = st.message;
-          }
-        }
-      } catch(e){}
-    }, 2500);
+    startColLoginPolling(name);
   } catch(e){
     $("col-login-qr").innerHTML = '<div class="empty">获取二维码失败：' + esc(e.message) + '</div>';
   }
@@ -1811,6 +1825,7 @@ async function colLoginRestart(){
                         {method:"POST", body:{platform:name, force:true}});
     $("col-login-msg").textContent = r.message || "正在重新生成…";
     if (r.qr) showCollectQr(r.qr);
+    startColLoginPolling(name);
   } catch(e){ toast("重新生成失败：" + e.message, "err"); }
 }
 
