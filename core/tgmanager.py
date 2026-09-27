@@ -268,13 +268,20 @@ class TelegramManager:
         return info
 
     def _resolve_token(self) -> tuple[str, str]:
-        """token 取用顺序：settings.tg_token（控制台可配）→ config.TG_TOKEN（.env）。"""
+        """token 取用顺序：settings.tg_token；多账号上下文不回落到共享 .env。"""
         try:
             v = (_settings().get("tg_token", "") or "").strip()
             if v:
                 return v, "settings"
         except Exception as e:
             log.debug("读取 settings.tg_token 失败（忽略）：%s", type(e).__name__)
+        # 每个控制台账号必须配置自己的 Bot，不能共用同一个 Bot。
+        try:
+            from core import accounts
+            if accounts.current_account():
+                return "", ""
+        except Exception:
+            pass
         try:
             v = str(getattr(_config(), "TG_TOKEN", "") or "").strip()
             if v:

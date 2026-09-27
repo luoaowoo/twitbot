@@ -381,7 +381,7 @@ def settings_view() -> dict:
             "allowed_users": raw.get("tg_allowed_users", ""),
             "allowed_chats": raw.get("tg_allowed_chats", ""),
             "autostart": raw.get("tg_autostart", "0") == "1",
-            "env_token_present": bool(getattr(config, "TG_TOKEN", "")),
+            "env_token_present": bool(getattr(config, "TG_TOKEN", "")) and accounts.current_account() is None,
         },
     }
 
@@ -663,6 +663,7 @@ class CollectKeyIn(BaseModel):
 
 class CollectLoginIn(BaseModel):
     platform: str = ""
+    force: bool = False
 
 
 class MediaValidateIn(BaseModel):
@@ -753,18 +754,20 @@ def tg_settings_view() -> dict:
         "allowed_users": raw.get("tg_allowed_users", ""),
         "allowed_chats": raw.get("tg_allowed_chats", ""),
         "autostart": raw.get("tg_autostart", "0") == "1",
-        "env_token_present": bool(getattr(config, "TG_TOKEN", "")),
+        "env_token_present": bool(getattr(config, "TG_TOKEN", "")) and accounts.current_account() is None,
     }
 
 
 def _tg_token() -> str:
-    """机器人 token（settings 优先，回落 .env）。**只在本进程内用，绝不外传。**"""
+    """机器人 token（settings 优先；账号上下文禁止回落共享 .env token）。"""
     try:
         t = (settings.get("tg_token", "") or "").strip()
         if t:
             return t
     except Exception:
         pass
+    if accounts.current_account():
+        return ""
     return (getattr(config, "TG_TOKEN", "") or "").strip()
 
 
@@ -1763,7 +1766,7 @@ def create_app() -> FastAPI:
         col = collect_mod.get_collector(body.platform or "")
         if col is None or not hasattr(col, "login_start"):
             raise HTTPException(400, f"{body.platform} 不支持扫码登录")
-        ok, msg, qr = await asyncio.to_thread(col.login_start)
+        ok, msg, qr = await asyncio.to_thread(col.login_start, force=bool(body.force))
         if not ok:
             raise HTTPException(400, msg)
         return {"ok": True, "message": msg, "qr": qr,

@@ -158,6 +158,9 @@
         font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px}
   td.txt{max-width:340px}
   .empty{text-align:center;color:var(--fg3);padding:34px 10px;font-size:13.5px}
+  .qr-loading{display:flex;flex-direction:column;align-items:center;gap:10px;
+              padding:30px 10px;color:var(--fg3);font-size:13px}
+  .qr-loading .spinner{width:24px;height:24px;border-width:3px}
   .filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
   .filters select{width:auto;min-width:140px}
 
@@ -769,8 +772,8 @@ async function doConsoleLogin(ev){
     const r = await api("/api/auth/login", {method:"POST", body:{username:u, password:p}});
     ACCOUNT = r.username || u;
     $("auth-pass").value = "";
-    hideAuthGate();
-    bootConsole();
+    // 关键：切账号后整页重载，清掉上一账号的 STATE/SSE/轮询状态。
+    window.location.replace("/");
   } catch(e) {
     $("auth-error").textContent = e.message || "登录失败";
   }
@@ -781,8 +784,8 @@ async function consoleLogout(){
   ACCOUNT = "";
   if (sse) { try { sse.close(); } catch(e){} sse = null; }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  showAuthGate("");
-  $("auth-pass").value = "";
+  // 退出后重载，确保下个账号不会看到上一账号残留状态。
+  window.location.replace("/");
 }
 
 /* X 字数折算：中文/emoji 计 2、URL 一律计 23、其它计 1（与 core.textutil.weighted_len 同口径） */
